@@ -3377,8 +3377,7 @@ class PlayerActivity :
           val videosInFolder =
             app.marlboroadvance.mpvex.repository.MediaFileRepository.getVideosForBuckets(
               context,
-              setOf(bucketId),
-              showHiddenFiles = showHiddenFiles,
+              setOf(bucketId)
             )
           val sortedVideos = app.marlboroadvance.mpvex.utils.sort.SortUtils.sortVideos(videosInFolder, videoSortType, videoSortOrder)
           sortedVideos.mapNotNull { video -> files.find { it.absolutePath == video.path } }

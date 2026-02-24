@@ -106,11 +106,8 @@ class VideoListViewModel(
   private fun loadVideos() {
     viewModelScope.launch(Dispatchers.IO) {
       try {
-        // Get the hidden files preference
-        val showHiddenFiles = appearancePreferences.showHiddenFiles.get()
-
         // First attempt to load videos (basic info from MediaStore)
-        var videoList = MediaFileRepository.getVideosInFolder(getApplication(), bucketId, showHiddenFiles)
+        var videoList = MediaFileRepository.getVideosInFolder(getApplication(), bucketId)
 
         // Enrich with metadata only if chips are enabled
         if (MetadataRetrieval.isVideoMetadataNeeded(browserPreferences)) {
@@ -141,7 +138,7 @@ class VideoListViewModel(
           Log.d(tag, "No videos found for bucket $bucketId - attempting media rescan")
           triggerMediaScan()
           delay(1000)
-          var retryVideoList = MediaFileRepository.getVideosInFolder(getApplication(), bucketId, showHiddenFiles)
+          var retryVideoList = MediaFileRepository.getVideosInFolder(getApplication(), bucketId)
 
           // Enrich retry list if needed
           if (MetadataRetrieval.isVideoMetadataNeeded(browserPreferences)) {

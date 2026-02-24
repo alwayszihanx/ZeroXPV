@@ -56,9 +56,7 @@ object MediaFileRepository : KoinComponent {
    * Clears cache for a specific folder (all variants)
    */
   fun clearCacheForFolder(bucketId: String) {
-    // Clear both cached variants (with and without hidden files)
-    videosCache.remove("$bucketId-true")
-    videosCache.remove("$bucketId-false")
+    videosCache.remove(bucketId)
     Log.d(TAG, "Cleared cache for bucket: $bucketId")
   }
 
@@ -69,13 +67,13 @@ object MediaFileRepository : KoinComponent {
   /**
    * Scans all storage volumes to find all folders containing videos using MediaStore
    * Much faster and simpler than recursive file scanning
+   * Shows all folders including hidden ones.
    */
   suspend fun getAllVideoFolders(
-    context: Context,
-    showHiddenFiles: Boolean,
+    context: Context
   ): List<VideoFolder> =
     withContext(Dispatchers.IO) {
-      val cacheKey = "all_folders_$showHiddenFiles"
+      val cacheKey = "all_folders"
 
       // Check cache first
       videoFoldersCache[cacheKey]?.let { (cached, timestamp) ->
@@ -86,7 +84,7 @@ object MediaFileRepository : KoinComponent {
       }
 
       try {
-        val result = MediaStoreScanner.getAllVideoFolders(context, showHiddenFiles)
+        val result = MediaStoreScanner.getAllVideoFolders(context)
 
         // Update cache
         videoFoldersCache[cacheKey] = Pair(result, System.currentTimeMillis())
@@ -105,9 +103,8 @@ object MediaFileRepository : KoinComponent {
    */
   suspend fun getAllVideoFoldersFast(
     context: Context,
-    showHiddenFiles: Boolean,
     onProgress: ((Int) -> Unit)? = null,
-  ): List<VideoFolder> = getAllVideoFolders(context, showHiddenFiles)
+  ): List<VideoFolder> = getAllVideoFolders(context)
 
   /**
    * No-op enrichment - MediaStore already provides all metadata
@@ -126,16 +123,15 @@ object MediaFileRepository : KoinComponent {
   /**
    * Gets all videos in a specific folder using MediaStore
    * @param bucketId Folder path
-   * @param showHiddenFiles Whether to show hidden files
+   * Shows all videos including hidden ones.
    */
   suspend fun getVideosInFolder(
     context: Context,
-    bucketId: String,
-    showHiddenFiles: Boolean = true,
+    bucketId: String
   ): List<Video> =
     withContext(Dispatchers.IO) {
       // Check cache first
-      val cacheKey = "$bucketId-$showHiddenFiles"
+      val cacheKey = bucketId
       videosCache[cacheKey]?.let { (cached, timestamp) ->
         if (System.currentTimeMillis() - timestamp < CACHE_VALIDITY_MS) {
           Log.d(TAG, "Returning cached videos for bucket $bucketId (${cached.size} videos)")
@@ -144,7 +140,7 @@ object MediaFileRepository : KoinComponent {
       }
 
       try {
-        val result = MediaStoreScanner.getVideosInFolder(context, bucketId, showHiddenFiles)
+        val result = MediaStoreScanner.getVideosInFolder(context, bucketId)
 
         // Update cache
         videosCache[cacheKey] = Pair(result, System.currentTimeMillis())
@@ -159,16 +155,16 @@ object MediaFileRepository : KoinComponent {
 
   /**
    * Gets videos from multiple folders
+   * Shows all videos including hidden ones.
    */
   suspend fun getVideosForBuckets(
     context: Context,
-    bucketIds: Set<String>,
-    showHiddenFiles: Boolean = true,
+    bucketIds: Set<String>
   ): List<Video> =
     withContext(Dispatchers.IO) {
       val result = mutableListOf<Video>()
       for (id in bucketIds) {
-        runCatching { result += getVideosInFolder(context, id, showHiddenFiles) }
+        runCatching { result += getVideosInFolder(context, id) }
       }
       result
     }

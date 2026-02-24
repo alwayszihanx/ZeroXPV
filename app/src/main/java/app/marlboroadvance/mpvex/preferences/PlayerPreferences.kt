@@ -63,7 +63,7 @@ class PlayerPreferences(
   val shuffleEnabled = preferenceStore.getBoolean("shuffle_enabled", false)
 
   // New: autoplay next video when current file ends
-  val autoplayNextVideo = preferenceStore.getBoolean("autoplay_next_video", false)
+  val autoplayNextVideo = preferenceStore.getBoolean("autoplay_next_video", true)
 
   val autoPiPOnNavigation = preferenceStore.getBoolean("auto_pip_on_navigation", false)
 

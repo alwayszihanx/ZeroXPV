@@ -420,7 +420,8 @@ fun SeriesDetailsSection(
                   }
                   DropdownMenu(
                       expanded = seasonDropdownExpanded.value,
-                      onDismissRequest = { seasonDropdownExpanded.value = false }
+                      onDismissRequest = { seasonDropdownExpanded.value = false },
+                      modifier = Modifier.heightIn(max = 300.dp)
                   ) {
                       tvShow.seasons.forEach { season ->
                           DropdownMenuItem(
@@ -456,7 +457,8 @@ fun SeriesDetailsSection(
                   }
                   DropdownMenu(
                       expanded = episodeDropdownExpanded.value,
-                      onDismissRequest = { episodeDropdownExpanded.value = false }
+                      onDismissRequest = { episodeDropdownExpanded.value = false },
+                      modifier = Modifier.heightIn(max = 300.dp)
                   ) {
                       episodes.forEach { episode ->
                           DropdownMenuItem(
