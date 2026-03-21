@@ -26,6 +26,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.marlboroadvance.mpvex.preferences.PlayerButton
@@ -109,16 +110,16 @@ fun TopLeftPlayerControlsLandscape(
               vertical = MaterialTheme.spacing.small,
             ),
         ) {
-          Text(
-            text = mediaTitle ?: "",
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = androidx.compose.ui.text.font.FontWeight.ExtraBold,
-            color = if (hideBackground) controlColor else MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.weight(1f, fill = false),
-          )
           viewModel.getPlaylistInfo()?.let { playlistInfo ->
+            Text(
+              text = playlistInfo,
+              textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+              style = MaterialTheme.typography.bodyMedium,
+              maxLines = 1,
+              overflow = TextOverflow.Visible,
+              fontFamily = FontFamily.Monospace,
+              color = MaterialTheme.colorScheme.primary,
+            )
             Text(
               text = Typography.bullet.toString(),
               textAlign = androidx.compose.ui.text.style.TextAlign.Center,
@@ -127,16 +128,16 @@ fun TopLeftPlayerControlsLandscape(
               color = if (hideBackground) controlColor else MaterialTheme.colorScheme.onSurface,
               overflow = TextOverflow.Clip,
             )
-            Text(
-              text = playlistInfo,
-              textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-              style = MaterialTheme.typography.bodyMedium,
-              maxLines = 1,
-              overflow = TextOverflow.Visible,
-              fontWeight = androidx.compose.ui.text.font.FontWeight.ExtraBold,
-              color = if (hideBackground) controlColor else MaterialTheme.colorScheme.onSurface,
-            )
           }
+          Text(
+            text = mediaTitle ?: "",
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.bodyMedium,
+            fontFamily = FontFamily.Monospace,
+            color = if (hideBackground) controlColor else MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.weight(1f, fill = false),
+          )
         }
       }
     }

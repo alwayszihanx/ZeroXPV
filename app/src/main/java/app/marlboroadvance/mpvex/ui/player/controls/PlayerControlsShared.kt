@@ -70,6 +70,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -165,16 +166,16 @@ fun RenderPlayerButton(
               vertical = MaterialTheme.spacing.small,
             ),
         ) {
-          Text(
-            text = mediaTitle ?: "",
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.ExtraBold,
-            color = if (hideBackground) controlColor else MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.weight(1f, fill = false),
-          )
           viewModel.getPlaylistInfo()?.let { playlistInfo ->
+            Text(
+              text = playlistInfo,
+              textAlign = TextAlign.Center,
+              style = MaterialTheme.typography.bodyMedium,
+              maxLines = 1,
+              overflow = TextOverflow.Visible,
+              fontFamily = FontFamily.Monospace,
+              color = MaterialTheme.colorScheme.primary,
+            )
             Text(
               text = Typography.bullet.toString(),
               textAlign = TextAlign.Center,
@@ -183,16 +184,16 @@ fun RenderPlayerButton(
               color = if (hideBackground) controlColor else MaterialTheme.colorScheme.onSurface,
               overflow = TextOverflow.Clip,
             )
-            Text(
-              text = playlistInfo,
-              textAlign = TextAlign.Center,
-              style = MaterialTheme.typography.bodyMedium,
-              maxLines = 1,
-              overflow = TextOverflow.Visible,
-              fontWeight = FontWeight.ExtraBold,
-              color = if (hideBackground) controlColor else MaterialTheme.colorScheme.onSurface,
-            )
           }
+          Text(
+            text = mediaTitle ?: "",
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.bodyMedium,
+            fontFamily = FontFamily.Monospace,
+            color = if (hideBackground) controlColor else MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.weight(1f, fill = false),
+          )
         }
       }
     }
@@ -250,6 +251,7 @@ fun RenderPlayerButton(
               text = String.format("%.2fx", playbackSpeed),
               maxLines = 1,
               style = MaterialTheme.typography.bodyMedium,
+              fontFamily = FontFamily.Monospace,
             )
           }
         }
@@ -502,6 +504,7 @@ fun RenderPlayerButton(
               text = String.format("%.0f%%", currentZoom * 100),
               maxLines = 1,
               style = MaterialTheme.typography.bodyMedium,
+              fontFamily = FontFamily.Monospace,
             )
           }
         }
@@ -743,6 +746,7 @@ fun RenderPlayerButton(
                   Text(
                     text = if (loopA != null) viewModel.formatTimestamp(loopA!!) else "A",
                     style = MaterialTheme.typography.labelLarge,
+                    fontFamily = FontFamily.Monospace,
                     color = if (loopA != null) {
                       MaterialTheme.colorScheme.onTertiaryContainer
                     } else {
@@ -790,6 +794,7 @@ fun RenderPlayerButton(
                   Text(
                     text = if (loopB != null) viewModel.formatTimestamp(loopB!!) else "B",
                     style = MaterialTheme.typography.labelLarge,
+                    fontFamily = FontFamily.Monospace,
                     color = if (loopB != null) {
                       MaterialTheme.colorScheme.onTertiaryContainer
                     } else {
