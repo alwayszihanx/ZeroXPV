@@ -82,4 +82,7 @@ val domainModule = module {
     single { MpvRxSubtitleHubRepository(androidContext(), get(), get(), get(), get()) }
     single { OnlineSubtitleOrchestrator(get<WyzieSearchRepository>(), get<MpvRxSubtitleHubRepository>()) }
     single { IntroDbRepository(get(), get()) }
+    single { app.gyrolet.mpvrx.repository.ai.GeminiClient(get(), get()) }
+    single { app.gyrolet.mpvrx.repository.ai.GroqClient(get(), get()) }
+    single { app.gyrolet.mpvrx.repository.ai.AiService(get(), get(), get(), get()) }
 }
