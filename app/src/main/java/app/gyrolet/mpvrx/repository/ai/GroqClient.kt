@@ -61,11 +61,15 @@ private data class GroqErrorDetail(
 class GroqClient(
   private val client: OkHttpClient,
   private val json: Json,
-) {
+) : AiClient {
   companion object {
     private const val TAG = "GroqClient"
     private const val BASE_URL = "https://api.groq.com/openai/v1"
     private val JSON_MEDIA_TYPE = "application/json".toMediaType()
+
+    val FREE_MODEL_PREFIXES = listOf(
+      "whisper", "distil-whisper", "llama", "gemma", "mixtral", "deepseek",
+    )
   }
 
   private val apiClient: OkHttpClient =
@@ -75,7 +79,7 @@ class GroqClient(
       .writeTimeout(60, TimeUnit.SECONDS)
       .build()
 
-  suspend fun fetchModels(apiKey: String): Result<List<AiModelInfo>> = withContext(Dispatchers.IO) {
+  override suspend fun fetchModels(apiKey: String): Result<List<AiModelInfo>> = withContext(Dispatchers.IO) {
     runCatching {
       val request = Request.Builder()
         .url("$BASE_URL/models")
@@ -93,17 +97,20 @@ class GroqClient(
 
       val parsed = json.decodeFromString<GroqModelListResponse>(body)
       parsed.data
-        .filter { it.id.startsWith("llama") || it.id.startsWith("gemma") || it.id.startsWith("mixtral") || it.id.startsWith("deepseek") }
+        .filter { !it.id.startsWith("gpt") && !it.id.startsWith("dall-e") && !it.id.startsWith("tts") && !it.id.startsWith("stt") }
         .map {
+          val isFree = FREE_MODEL_PREFIXES.any { prefix -> it.id.startsWith(prefix, ignoreCase = true) }
+          val displayName = if (it.owned_by != null) "${it.id} (${it.owned_by})" else it.id
           AiModelInfo(
             id = it.id,
-            displayName = "${it.id} (${it.owned_by ?: "Groq"})",
+            displayName = displayName,
+            isFree = isFree,
           )
         }
     }
   }
 
-  suspend fun verifyKey(apiKey: String): Result<String> = withContext(Dispatchers.IO) {
+  override suspend fun verifyKey(apiKey: String): Result<String> = withContext(Dispatchers.IO) {
     runCatching {
       val request = Request.Builder()
         .url("$BASE_URL/models")
@@ -120,11 +127,12 @@ class GroqClient(
     }
   }
 
-  suspend fun generateContent(
+  override suspend fun generateContent(
     apiKey: String,
     model: String,
     instruction: String,
     userInput: String,
+    options: AiGenerationOptions,
   ): Result<String> = withContext(Dispatchers.IO) {
     runCatching {
       val requestBody = json.encodeToString(
@@ -135,8 +143,8 @@ class GroqClient(
             GroqMessage(role = "system", content = instruction),
             GroqMessage(role = "user", content = userInput),
           ),
-          temperature = 0.3,
-          maxTokens = 200,
+          temperature = options.temperature,
+          maxTokens = options.maxTokens,
         ),
       )
 
