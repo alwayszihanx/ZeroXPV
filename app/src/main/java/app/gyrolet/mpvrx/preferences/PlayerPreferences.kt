@@ -8,6 +8,7 @@ import app.gyrolet.mpvrx.ui.player.ControlsAnimationStyle
 import app.gyrolet.mpvrx.ui.player.NavigationAnimStyle
 import app.gyrolet.mpvrx.ui.player.PlayerOrientation
 import app.gyrolet.mpvrx.ui.player.RepeatMode
+import app.gyrolet.mpvrx.ui.player.screenshot.ScreenshotFormat
 import app.gyrolet.mpvrx.ui.player.VideoAspect
 import app.gyrolet.mpvrx.ui.player.VideoOpenAnimation
 
@@ -69,6 +70,11 @@ class PlayerPreferences(
   val panAndZoomEnabled = preferenceStore.getBoolean("pan_and_zoom_enabled", false)
 
   val includeSubtitlesInSnapshot = preferenceStore.getBoolean("include_subtitles_in_snapshot", false)
+  val screenshotFormat = preferenceStore.getEnum("screenshot_format", ScreenshotFormat.PNG)
+  val screenshotTemplate = preferenceStore.getString("screenshot_template", "mpv_snapshot_%Y%m%d_%H%M%S")
+  val screenshotQuality = preferenceStore.getInt("screenshot_quality", 90)
+  val screenshotPngCompression = preferenceStore.getInt("screenshot_png_compression", 7)
+  val screenshotWebpLossless = preferenceStore.getBoolean("screenshot_webp_lossless", false)
 
   val playlistMode = preferenceStore.getBoolean("playlist_mode", true)
   val playlistViewMode = preferenceStore.getBoolean("playlist_view_mode_list", true) // true = list, false = grid
