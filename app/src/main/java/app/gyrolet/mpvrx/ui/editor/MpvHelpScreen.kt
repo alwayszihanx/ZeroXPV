@@ -54,10 +54,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -66,6 +64,7 @@ import androidx.compose.ui.unit.dp
 import app.gyrolet.mpvrx.presentation.Screen
 import app.gyrolet.mpvrx.ui.utils.LocalBackStack
 import app.gyrolet.mpvrx.ui.utils.popSafely
+import app.gyrolet.mpvrx.utils.clipboard.SafeClipboard
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -116,8 +115,6 @@ data class MpvHelpScreen(
             }
         }
 
-        @Suppress("DEPRECATION")
-        val clipboardManager = LocalClipboardManager.current
         val context = LocalContext.current
 
         fun copyToClipboard(entry: HelpEntry) {
@@ -127,7 +124,7 @@ data class MpvHelpScreen(
                 HelpEntryKind.PROPERTY -> entry.name
                 HelpEntryKind.JS_API -> entry.signature.substringBefore("(") + "()"
             }
-            clipboardManager.setText(AnnotatedString(text))
+            SafeClipboard.copyPlainText(context, "mpv_help", text, showToast = false)
             Toast.makeText(context, "Copied: $text", Toast.LENGTH_SHORT).show()
         }
 
@@ -428,5 +425,4 @@ private fun filterChipColors() = FilterChipDefaults.filterChipColors(
     selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
     selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
 )
-
 

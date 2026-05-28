@@ -4,8 +4,6 @@ import app.gyrolet.mpvrx.ui.icons.Icon
 import app.gyrolet.mpvrx.ui.icons.Icons
 
 import android.content.Intent
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.net.Uri
 import android.os.Environment
 import android.widget.Toast
@@ -60,6 +58,7 @@ import app.gyrolet.mpvrx.presentation.crash.CrashActivity
 import app.gyrolet.mpvrx.ui.player.NotificationStyle
 import app.gyrolet.mpvrx.ui.utils.LocalBackStack
 import app.gyrolet.mpvrx.ui.utils.popSafely
+import app.gyrolet.mpvrx.utils.clipboard.SafeClipboard
 import app.gyrolet.mpvrx.utils.history.RecentlyPlayedOps
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -819,7 +818,6 @@ object AdvancedPreferencesScreen : Screen {
           item {
             PreferenceCard {
               val activity = LocalActivity.current!!
-              val clipboardManager = context.getSystemService(ClipboardManager::class.java)
               val verboseLogging by preferences.verboseLogging.collectAsState()
               
               SwitchPreference(
@@ -849,11 +847,10 @@ object AdvancedPreferencesScreen : Screen {
                     val deviceInfo = CrashActivity.collectDeviceInfo()
                     val logcat = CrashActivity.collectLogcat()
     
-                    clipboardManager?.setPrimaryClip(
-                      ClipData.newPlainText(
-                        "mpvrx_logs",
-                        CrashActivity.concatLogs(deviceInfo, null, logcat),
-                      ),
+                    SafeClipboard.copyPlainText(
+                      context = context,
+                      label = "mpvrx_logs",
+                      text = CrashActivity.concatLogs(deviceInfo, null, logcat),
                     )
                     CrashActivity.shareLogs(deviceInfo, null, logcat, activity)
                   }

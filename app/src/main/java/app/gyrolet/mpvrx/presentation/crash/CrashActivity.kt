@@ -5,7 +5,6 @@ import app.gyrolet.mpvrx.ui.icons.Icons
 
 import android.app.Activity
 import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
@@ -64,6 +63,7 @@ import app.gyrolet.mpvrx.preferences.preference.collectAsState
 import app.gyrolet.mpvrx.ui.theme.DarkMode
 import app.gyrolet.mpvrx.ui.theme.MpvrxTheme
 import app.gyrolet.mpvrx.ui.theme.spacing
+import app.gyrolet.mpvrx.utils.clipboard.SafeClipboard
 import `is`.xyz.mpv.Utils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -75,7 +75,6 @@ import java.io.File
 import java.io.InputStreamReader
 
 class CrashActivity : ComponentActivity() {
-  private val clipboardManager by lazy { getSystemService(CLIPBOARD_SERVICE) as ClipboardManager }
   private var logcat: String = ""
   private val appearancePreferences: AppearancePreferences by inject()
 
@@ -292,11 +291,10 @@ class CrashActivity : ComponentActivity() {
             ) { Text(stringResource(R.string.crash_screen_share)) }
             FilledIconButton(
               onClick = {
-                clipboardManager.setPrimaryClip(
-                  ClipData.newPlainText(
-                    null,
-                    concatLogs(collectDeviceInfo(), exceptionString, logcat),
-                  ),
+                SafeClipboard.copyPlainText(
+                  context = this@CrashActivity,
+                  label = "mpvrx_crash_logs",
+                  text = concatLogs(collectDeviceInfo(), exceptionString, logcat),
                 )
               },
             ) {
