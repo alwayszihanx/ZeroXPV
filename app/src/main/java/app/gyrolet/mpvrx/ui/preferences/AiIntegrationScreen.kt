@@ -85,7 +85,7 @@ import app.gyrolet.mpvrx.ui.preferences.PreferenceCard
 import app.gyrolet.mpvrx.ui.preferences.PreferenceDivider
 import app.gyrolet.mpvrx.ui.preferences.PreferenceSectionHeader
 import me.zhanghai.compose.preference.ProvidePreferenceLocals
-import me.zhanghai.compose.preference.SwitchPreference
+import app.gyrolet.mpvrx.ui.preferences.components.SwitchPreference
 import org.koin.compose.koinInject
 
 private val allLanguages = mapOf(

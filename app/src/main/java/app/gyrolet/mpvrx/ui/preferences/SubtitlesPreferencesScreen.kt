@@ -52,7 +52,7 @@ import kotlinx.serialization.Serializable
 import me.zhanghai.compose.preference.Preference
 import me.zhanghai.compose.preference.ProvidePreferenceLocals
 import me.zhanghai.compose.preference.ListPreference
-import me.zhanghai.compose.preference.SwitchPreference
+import app.gyrolet.mpvrx.ui.preferences.components.SwitchPreference
 import me.zhanghai.compose.preference.TextFieldPreference
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox

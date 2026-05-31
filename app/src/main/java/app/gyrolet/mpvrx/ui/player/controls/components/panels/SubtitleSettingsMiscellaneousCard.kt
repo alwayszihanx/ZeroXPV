@@ -34,7 +34,7 @@ import app.gyrolet.mpvrx.ui.player.controls.panelCardsColors
 import app.gyrolet.mpvrx.ui.theme.spacing
 import `is`.xyz.mpv.MPVLib
 import me.zhanghai.compose.preference.ProvidePreferenceLocals
-import me.zhanghai.compose.preference.SwitchPreference
+import app.gyrolet.mpvrx.ui.preferences.components.SwitchPreference
 import org.koin.compose.koinInject
 
 @Composable

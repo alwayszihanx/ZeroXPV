@@ -41,7 +41,7 @@ import kotlinx.serialization.Serializable
 import org.koin.compose.koinInject
 import java.io.File
 import me.zhanghai.compose.preference.ProvidePreferenceLocals
-import me.zhanghai.compose.preference.SwitchPreference
+import app.gyrolet.mpvrx.ui.preferences.components.SwitchPreference
 
 @Serializable
 object YtdlpSettingsScreen : Screen {

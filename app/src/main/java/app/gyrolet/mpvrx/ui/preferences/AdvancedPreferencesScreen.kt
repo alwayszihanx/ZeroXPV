@@ -67,7 +67,7 @@ import kotlinx.serialization.Serializable
 import me.zhanghai.compose.preference.ListPreference
 import me.zhanghai.compose.preference.Preference
 import me.zhanghai.compose.preference.ProvidePreferenceLocals
-import me.zhanghai.compose.preference.SwitchPreference
+import app.gyrolet.mpvrx.ui.preferences.components.SwitchPreference
 import me.zhanghai.compose.preference.TwoTargetIconButtonPreference
 import org.koin.compose.koinInject
 import java.io.File
