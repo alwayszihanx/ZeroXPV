@@ -74,6 +74,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import android.util.Log
 import app.gyrolet.mpvrx.domain.browser.FileSystemItem
+import app.gyrolet.mpvrx.domain.media.model.Video
 import app.gyrolet.mpvrx.domain.media.model.VideoFolder
 import app.gyrolet.mpvrx.preferences.AppearancePreferences
 import app.gyrolet.mpvrx.preferences.BrowserPreferences
@@ -113,6 +114,7 @@ import app.gyrolet.mpvrx.ui.utils.LocalBackStack
 import app.gyrolet.mpvrx.utils.clipboard.SafeClipboard
 import app.gyrolet.mpvrx.utils.history.RecentlyPlayedOps
 import app.gyrolet.mpvrx.utils.media.MediaUtils
+import app.gyrolet.mpvrx.utils.media.MediaSearchEngine
 import app.gyrolet.mpvrx.utils.permission.PermissionUtils
 import app.gyrolet.mpvrx.utils.sort.SortUtils
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
@@ -413,7 +415,12 @@ object FolderListScreen : Screen {
             onBackClick = null,
             onCancelSelection = { selectionManager.clear() },
             onSortClick = { sortDialogOpen.value = true },
-            onSearchClick = { isSearching = !isSearching },
+            onSearchClick = {
+              isSearching = !isSearching
+              coroutineScope.launch {
+                buildSearchIndex(context)
+              }
+            },
             onSettingsClick = {
               backstack.add(app.gyrolet.mpvrx.ui.preferences.PreferencesScreen)
             },
@@ -1287,65 +1294,70 @@ private fun SearchResultsContent(
   }
 }
 
+
 /**
  * Searches for folders and videos matching the query
  * Returns FileSystemItem results containing matching folders and videos
  */
+
+object SearchManager {
+  val engine = MediaSearchEngine
+}
+
+private suspend fun buildSearchIndex(context: Context) {
+  val folders = app.gyrolet.mpvrx.repository.MediaFileRepository.getAllVideoFoldersFast(context)
+  val videosByFolder = folders.associate { folder ->
+    folder.bucketId to app.gyrolet.mpvrx.repository.MediaFileRepository.getVideosInFolder(context, folder.bucketId)
+  }
+  SearchManager.engine.buildIndex(folders, videosByFolder)
+}
+
 private suspend fun searchFoldersAndVideos(
   context: Context,
   query: String,
 ): List<FileSystemItem> {
   val results = mutableListOf<FileSystemItem>()
-  
   try {
     Log.d("FolderListScreen", "Searching for: $query")
     
-    // Get all video folders
-    val folders = app.gyrolet.mpvrx.repository.MediaFileRepository
-      .getAllVideoFoldersFast(context)
-    
-    // Search in folders
-    folders.forEach { folder ->
-      if (folder.name.contains(query, ignoreCase = true) || 
-          folder.path.contains(query, ignoreCase = true)) {
-        results.add(
-          FileSystemItem.Folder(
-            name = folder.name,
-            path = folder.path,
-            lastModified = folder.lastModified,
-            videoCount = folder.videoCount,
-            totalSize = folder.totalSize,
-            totalDuration = folder.totalDuration,
+    // Get all search matches from the optimized engine
+    val matches = SearchManager.engine.search(query, limit = 50)
+
+    for (item in matches) {
+      when (item) {
+        // Kotlin smart-casts 'item' to your domain model VideoFolder
+        is VideoFolder -> {
+          results.add(
+            FileSystemItem.Folder(
+              name = item.name,
+              path = item.path,
+              lastModified = item.lastModified,
+              videoCount = item.videoCount,
+              totalSize = item.totalSize,
+              totalDuration = item.totalDuration,
+            )
           )
-        )
-      }
-      
-      // Also search within videos in this folder
-      val videos = app.gyrolet.mpvrx.repository.MediaFileRepository
-        .getVideosInFolder(context, folder.bucketId)
-      
-      videos.forEach { video ->
-        if (video.displayName.contains(query, ignoreCase = true)) {
+        }
+        // Kotlin smart-casts 'item' to your domain model Video
+        is Video -> {
           results.add(
             FileSystemItem.VideoFile(
-              name = video.displayName,
-              path = video.path,
-              lastModified = video.dateModified,
-              video = video,
+              name = item.displayName,
+              path = item.path,
+              lastModified = item.dateModified,
+              video = item,
             )
           )
         }
       }
     }
-    
+
     Log.d("FolderListScreen", "Found ${results.size} results for: $query")
   } catch (e: Exception) {
     Log.e("FolderListScreen", "Error searching folders and videos", e)
   }
-  
   return results
 }
-
 
 
 
