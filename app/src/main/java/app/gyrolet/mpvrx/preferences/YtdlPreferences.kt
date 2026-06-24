@@ -6,6 +6,7 @@ import app.gyrolet.mpvrx.ui.player.ytdlp.YtdlCodecPreference
 import app.gyrolet.mpvrx.ui.player.ytdlp.YtdlContainerPreference
 import app.gyrolet.mpvrx.ui.player.ytdlp.YtdlHdrPreference
 import app.gyrolet.mpvrx.ui.player.ytdlp.YtdlPlaylistMode
+import app.gyrolet.mpvrx.ui.player.ytdlp.YtdlAudioPreference
 
 class YtdlPreferences(
   preferenceStore: PreferenceStore,
@@ -17,6 +18,7 @@ class YtdlPreferences(
   val maxFps = preferenceStore.getInt("ytdl_max_fps", 0)
   val hdrPreference = preferenceStore.getEnum("ytdl_hdr_preference", YtdlHdrPreference.ANY)
   val containerPreference = preferenceStore.getEnum("ytdl_container_preference", YtdlContainerPreference.ANY)
+  val audioPreference = preferenceStore.getEnum("ytdl_audio_preference", YtdlAudioPreference.AUTO)
   val formatSort = preferenceStore.getString("ytdl_format_sort", "")
   val mergeOutputFormat = preferenceStore.getString("ytdl_merge_output_format", "")
 
