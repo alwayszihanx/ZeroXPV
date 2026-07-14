@@ -48,6 +48,7 @@ import app.gyrolet.mpvrx.ui.player.VideoOpenAnimation
 import app.gyrolet.mpvrx.ui.player.controls.components.sheets.toFixed
 import app.gyrolet.mpvrx.preferences.MultiChoiceSegmentedButton
 import app.gyrolet.mpvrx.preferences.ThumbnailMode
+import app.gyrolet.mpvrx.preferences.TreeFlattenDepth
 import app.gyrolet.mpvrx.preferences.preference.collectAsState
 import app.gyrolet.mpvrx.presentation.Screen
 import app.gyrolet.mpvrx.presentation.components.ConfirmDialog
@@ -90,6 +91,7 @@ object AppearancePreferencesScreen : Screen {
         val storedThumbnailMode by browserPreferences.thumbnailMode.collectAsState()
         val thumbnailFramePosition by browserPreferences.thumbnailFramePosition.collectAsState()
         val dualPaneForTablet by browserPreferences.dualPaneForTablet.collectAsState()
+        val treeFlattenDepth by browserPreferences.treeFlattenDepth.collectAsState()
         val thumbnailCacheClearedMessage = stringResource(R.string.pref_thumbnail_cache_cleared)
 
         val thumbnailMode = storedThumbnailMode
@@ -344,6 +346,25 @@ object AppearancePreferencesScreen : Screen {
                                         color = MaterialTheme.colorScheme.outline,
                                     )
                                 }
+                            )
+
+                            PreferenceDivider()
+
+                            ListPreference(
+                                value = treeFlattenDepth,
+                                onValueChange = browserPreferences.treeFlattenDepth::set,
+                                values = TreeFlattenDepth.entries,
+                                valueToText = { AnnotatedString(it.displayName) },
+                                title = { Text(stringResource(R.string.pref_tree_flatten_depth_title)) },
+                                summary = {
+                                    Text(
+                                        stringResource(
+                                            R.string.pref_tree_flatten_depth_summary,
+                                            treeFlattenDepth.displayName,
+                                        ),
+                                        color = MaterialTheme.colorScheme.outline,
+                                    )
+                                },
                             )
 
                             PreferenceDivider()

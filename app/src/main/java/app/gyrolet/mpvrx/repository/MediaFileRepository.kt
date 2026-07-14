@@ -11,6 +11,7 @@ import app.gyrolet.mpvrx.domain.media.model.Video
 import app.gyrolet.mpvrx.domain.media.model.VideoFolder
 import app.gyrolet.mpvrx.domain.playbackstate.repository.PlaybackStateRepository
 import app.gyrolet.mpvrx.preferences.AppearancePreferences
+import app.gyrolet.mpvrx.preferences.BrowserPreferences
 import app.gyrolet.mpvrx.preferences.FoldersPreferences
 import app.gyrolet.mpvrx.utils.storage.FolderViewScanner
 import app.gyrolet.mpvrx.utils.storage.TreeViewScanner
@@ -44,11 +45,14 @@ object MediaFileRepository : KoinComponent {
   private const val TAG = "MediaFileRepository"
   private val foldersPreferences: FoldersPreferences by inject()
   private val appearancePreferences: AppearancePreferences by inject()
+  private val browserPreferences: BrowserPreferences by inject()
   private val playbackStateRepository: PlaybackStateRepository by inject()
 
   private fun currentScanOptions(): MediaScanOptions =
     MediaScanOptions(
       includeNoMediaFolders = foldersPreferences.includeNoMediaFolders.get(),
+      includeAudio = browserPreferences.includeAudio.get(),
+      minimumAudioDurationSeconds = browserPreferences.minimumAudioDuration.get().seconds,
     )
 
   private suspend fun getTreeViewNewBadgeParams(): Triple<Boolean, Int, Set<String>> {
@@ -377,6 +381,7 @@ object MediaFileRepository : KoinComponent {
             playedMediaTitles = playedMediaTitles,
             showNewLabels = showNewLabels,
             thresholdDays = thresholdDays,
+            maxAutoFlattenLevels = browserPreferences.treeFlattenDepth.get().maxLevels,
           )
         folders.forEach { folderData ->
           items.add(
