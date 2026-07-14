@@ -52,6 +52,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import app.gyrolet.mpvrx.preferences.AdvancedPreferences
+import app.gyrolet.mpvrx.preferences.AudioPreferences
 import app.gyrolet.mpvrx.preferences.PlayerButton
 import app.gyrolet.mpvrx.preferences.PlayerClockFormat
 import app.gyrolet.mpvrx.preferences.PlayerPreferences
@@ -822,10 +823,19 @@ fun RenderPlayerButton(
     }
 
     PlayerButton.BACKGROUND_PLAYBACK -> {
+      val audioPreferences = koinInject<AudioPreferences>()
+      val backgroundPlaybackEnabled by audioPreferences.backgroundPlayback.collectAsState()
       ControlsButton(
         icon = Icons.Default.Headset,
-        onClick = { activity.triggerBackgroundPlayback() },
-        color = if (hideBackground) controlColor else MaterialTheme.colorScheme.onSurface,
+        onClick = { activity.toggleBackgroundPlayback() },
+        color =
+          if (backgroundPlaybackEnabled) {
+            MaterialTheme.colorScheme.primary
+          } else if (hideBackground) {
+            controlColor
+          } else {
+            MaterialTheme.colorScheme.onSurface
+          },
         modifier = Modifier.size(buttonSize),
       )
     }
