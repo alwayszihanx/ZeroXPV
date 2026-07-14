@@ -27,6 +27,7 @@ import app.gyrolet.mpvrx.R
 import app.gyrolet.mpvrx.preferences.AudioChannels
 import app.gyrolet.mpvrx.preferences.AudioPreferences
 import app.gyrolet.mpvrx.preferences.BrowserPreferences
+import app.gyrolet.mpvrx.preferences.MediaLibraryType
 import app.gyrolet.mpvrx.preferences.preference.collectAsState
 import app.gyrolet.mpvrx.presentation.Screen
 import app.gyrolet.mpvrx.ui.utils.LocalBackStack
@@ -88,7 +89,12 @@ object AudioPreferencesScreen : Screen {
               val includeAudioBrowser by browserPreferences.includeAudioBrowser.collectAsState()
               SwitchPreference(
                 value = includeAudioBrowser,
-                onValueChange = { browserPreferences.includeAudioBrowser.set(it) },
+                onValueChange = { enabled ->
+                  browserPreferences.includeAudioBrowser.set(enabled)
+                  if (!enabled) {
+                    browserPreferences.mediaLibraryType.set(MediaLibraryType.Video)
+                  }
+                },
                 title = { Text("Include audio files") },
                 summary = {
                   Text(
@@ -203,22 +209,14 @@ object AudioPreferencesScreen : Screen {
               )
 
               PreferenceDivider()
-              val automaticBackgroundPlayback by preferences.automaticBackgroundPlayback.collectAsState()
+              val backgroundPlayback by preferences.backgroundPlayback.collectAsState()
               SwitchPreference(
-                value = automaticBackgroundPlayback,
-                onValueChange = { preferences.automaticBackgroundPlayback.set(it) },
+                value = backgroundPlayback,
+                onValueChange = { preferences.backgroundPlayback.set(it) },
                 title = { Text(stringResource(R.string.background_playback_title)) },
-              )
-
-              PreferenceDivider()
-              val playAudioAfterScreenLock by preferences.playAudioAfterScreenLock.collectAsState()
-              SwitchPreference(
-                value = playAudioAfterScreenLock,
-                onValueChange = { preferences.playAudioAfterScreenLock.set(it) },
-                title = { Text("Play audio after screen lock") },
                 summary = {
                   Text(
-                    "Keep audio files playing when the screen turns off or the device locks",
+                    "Keep audio and video playing when leaving the player or locking the screen",
                     color = MaterialTheme.colorScheme.outline,
                   )
                 },
