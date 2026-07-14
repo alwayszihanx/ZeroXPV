@@ -35,6 +35,9 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Modifier
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -67,7 +70,9 @@ import app.gyrolet.mpvrx.preferences.VideoSortType
 import app.gyrolet.mpvrx.ui.browser.playlist.ALL_VIDEOS_PLAYLIST_ID
 import app.gyrolet.mpvrx.ui.browser.playlist.buildAllVideosPlaylistEntity
 import app.gyrolet.mpvrx.ui.browser.playlist.isAllVideosPlaylist
+import app.gyrolet.mpvrx.preferences.preference.collectAsState
 import app.gyrolet.mpvrx.ui.player.controls.PlayerControls
+import app.gyrolet.mpvrx.ui.player.visualizer.BlobOverlay
 import app.gyrolet.mpvrx.ui.player.ytdlp.YtdlpManager
 import app.gyrolet.mpvrx.ui.theme.MpvrxTheme
 import app.gyrolet.mpvrx.utils.history.RecentlyPlayedOps
@@ -765,14 +770,22 @@ class PlayerActivity :
   private fun setupPlayerControls() {
     binding.controls.setContent {
       MpvrxTheme {
-        PlayerControls(
-          viewModel = viewModel,
-          onBackPress = {
-            isUserFinishing = true
-            finish()
-          },
-          modifier = Modifier,
-        )
+        val isAudioOnly by viewModel.isAudioOnly.collectAsState()
+        val audioBlobEnabled by audioPreferences.audioBlobEnabled.collectAsState()
+        val paused by MPVLib.propBoolean["pause"].collectAsState()
+        Box(modifier = Modifier.fillMaxSize()) {
+          if (isAudioOnly && audioBlobEnabled) {
+            BlobOverlay(isPlaying = paused == false)
+          }
+          PlayerControls(
+            viewModel = viewModel,
+            onBackPress = {
+              isUserFinishing = true
+              finish()
+            },
+            modifier = Modifier,
+          )
+        }
       }
     }
   }
@@ -4833,8 +4846,8 @@ class PlayerActivity :
     launchSource: String,
   ): List<File> {
     val parentFolder = currentFile.parentFile ?: return emptyList()
-    val includeAudio = browserPreferences.includeAudio.get()
-    val minimumAudioDurationMs = browserPreferences.minimumAudioDuration.get().seconds * 1000L
+    val includeAudio = browserPreferences.includeAudioBrowser.get()
+    val minimumAudioDurationMs = browserPreferences.minimumAudioDurationSeconds.get() * 1000L
     val directMediaFiles =
       parentFolder.listFiles { file ->
         file.isFile &&
