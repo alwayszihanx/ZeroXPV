@@ -47,6 +47,7 @@ import app.gyrolet.mpvrx.preferences.AppearancePreferences
 import app.gyrolet.mpvrx.preferences.PlayerButton
 import app.gyrolet.mpvrx.preferences.PlayerClockFormat
 import app.gyrolet.mpvrx.preferences.PlayerPreferences
+import app.gyrolet.mpvrx.preferences.PortraitPlaybackControlsPosition
 import app.gyrolet.mpvrx.preferences.SeekbarStyle
 import app.gyrolet.mpvrx.preferences.preference.collectAsState
 import app.gyrolet.mpvrx.presentation.Screen
@@ -234,6 +235,8 @@ object PlayerControlsPreferencesScreen : Screen {
           
           item {
             val hidePlayerButtonsBackground by appearancePrefs.hidePlayerButtonsBackground.collectAsState()
+            val portraitPlaybackControlsPosition by
+              appearancePrefs.portraitPlaybackControlsPosition.collectAsState()
             val playerTimeToDisappear by playerPrefs.playerTimeToDisappear.collectAsState()
             val clockFormat by playerPrefs.clockFormat.collectAsState()
             val predefinedTimeValues = listOf(500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000)
@@ -243,6 +246,17 @@ object PlayerControlsPreferencesScreen : Screen {
             var customTimeValue by remember { mutableStateOf("") }
             
             PreferenceCard {
+              ListPreference(
+                value = portraitPlaybackControlsPosition,
+                onValueChange = { appearancePrefs.portraitPlaybackControlsPosition.set(it) },
+                values = PortraitPlaybackControlsPosition.entries,
+                valueToText = { AnnotatedString(it.displayName) },
+                title = { Text("Portrait playback buttons") },
+                summary = { Text(portraitPlaybackControlsPosition.displayName) },
+              )
+
+              PreferenceDivider()
+
               SwitchPreference(
                 value = hidePlayerButtonsBackground,
                 onValueChange = { appearancePrefs.hidePlayerButtonsBackground.set(it) },
