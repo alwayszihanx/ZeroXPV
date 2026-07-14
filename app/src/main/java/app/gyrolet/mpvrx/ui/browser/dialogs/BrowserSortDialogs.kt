@@ -1,17 +1,27 @@
 package app.gyrolet.mpvrx.ui.browser.dialogs
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import app.gyrolet.mpvrx.preferences.AppearancePreferences
 import app.gyrolet.mpvrx.preferences.BrowserPreferences
 import app.gyrolet.mpvrx.preferences.FolderSortType
 import app.gyrolet.mpvrx.preferences.FolderViewMode
 import app.gyrolet.mpvrx.preferences.MediaLayoutMode
+import app.gyrolet.mpvrx.preferences.MinimumAudioDuration
 import app.gyrolet.mpvrx.preferences.SortOrder
 import app.gyrolet.mpvrx.preferences.VideoSortType
 import app.gyrolet.mpvrx.preferences.preference.collectAsState
+import app.gyrolet.mpvrx.repository.MediaFileRepository
+import app.gyrolet.mpvrx.utils.media.MediaLibraryEvents
 import app.gyrolet.mpvrx.ui.icons.Icons
 import org.koin.compose.koinInject
 
@@ -180,7 +190,7 @@ fun FolderSortDialog(
       )
       add(
         VisibilityToggle(
-          label = "Total Videos",
+          label = "Total Media",
           checked = showTotalVideosChip,
           onCheckedChange = { browserPreferences.showTotalVideosChip.set(it) },
         )
@@ -688,7 +698,7 @@ fun FileSystemSortDialog(
       )
       add(
         VisibilityToggle(
-          label = "Total Videos",
+          label = "Total Media",
           checked = showTotalVideosChip,
           onCheckedChange = { browserPreferences.showTotalVideosChip.set(it) },
         )
@@ -755,6 +765,6 @@ fun FileSystemSortDialog(
           )
         )
       }
-    }
+    },
   )
 }

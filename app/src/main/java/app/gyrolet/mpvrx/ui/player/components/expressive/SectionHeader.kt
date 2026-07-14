@@ -11,10 +11,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import app.gyrolet.mpvrx.ui.icons.Icon
+import app.gyrolet.mpvrx.ui.icons.AppIcon
 import app.gyrolet.mpvrx.ui.icons.Icons
 import app.gyrolet.mpvrx.ui.theme.AppMotion
 
@@ -25,7 +25,7 @@ import app.gyrolet.mpvrx.ui.theme.AppMotion
 fun SectionHeader(
   title: String,
   modifier: Modifier = Modifier,
-  leadingIcon: ImageVector? = null,
+  leadingIcon: AppIcon? = null,
   count: Int? = null,
   isExpanded: Boolean = false,
   onClick: (() -> Unit)? = null,
@@ -43,7 +43,7 @@ fun SectionHeader(
     verticalAlignment = Alignment.CenterVertically,
   ) {
     leadingIcon?.let { icon ->
-      androidx.compose.material3.Icon(
+      Icon(
         imageVector = icon,
         contentDescription = null,
         tint = MaterialTheme.colorScheme.onSurfaceVariant,
