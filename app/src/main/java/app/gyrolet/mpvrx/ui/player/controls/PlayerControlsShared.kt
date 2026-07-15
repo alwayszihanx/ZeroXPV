@@ -57,6 +57,7 @@ import app.gyrolet.mpvrx.preferences.PlayerButton
 import app.gyrolet.mpvrx.preferences.PlayerClockFormat
 import app.gyrolet.mpvrx.preferences.PlayerPreferences
 import app.gyrolet.mpvrx.preferences.preference.collectAsState
+import app.gyrolet.mpvrx.ui.cast.CastPlayerButton
 import app.gyrolet.mpvrx.ui.player.Panels
 import app.gyrolet.mpvrx.ui.player.PlayerActivity
 import app.gyrolet.mpvrx.ui.player.PlayerViewModel
@@ -520,6 +521,13 @@ fun RenderPlayerButton(
         onClick = { activity.enterPipModeHidingOverlay() },
         color = if (hideBackground) controlColor else MaterialTheme.colorScheme.onSurface,
         modifier = Modifier.size(buttonSize),
+      )
+    }
+
+    PlayerButton.CAST -> {
+      CastPlayerButton(
+        hideBackground = hideBackground,
+        buttonSize = buttonSize,
       )
     }
 
