@@ -52,6 +52,7 @@ import app.gyrolet.mpvrx.preferences.SeekbarStyle
 import app.gyrolet.mpvrx.preferences.preference.collectAsState
 import app.gyrolet.mpvrx.presentation.Screen
 import app.gyrolet.mpvrx.ui.utils.LocalBackStack
+import app.gyrolet.mpvrx.ui.utils.LocalShowSettingsBackArrow
 import app.gyrolet.mpvrx.ui.utils.popSafely
 import kotlinx.serialization.Serializable
 import me.zhanghai.compose.preference.ListPreference
@@ -113,12 +114,14 @@ object PlayerControlsPreferencesScreen : Screen {
             )
           },
           navigationIcon = {
-            IconButton(onClick = { backstack.popSafely() }) {
-              Icon(
-                Icons.Outlined.ArrowBack, 
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.secondary,
-              )
+            if (LocalShowSettingsBackArrow.current) {
+              IconButton(onClick = { backstack.popSafely() }) {
+                Icon(
+                  Icons.Default.ArrowBack, 
+                  contentDescription = null,
+                  tint = MaterialTheme.colorScheme.secondary,
+                )
+              }
             }
           },
         )

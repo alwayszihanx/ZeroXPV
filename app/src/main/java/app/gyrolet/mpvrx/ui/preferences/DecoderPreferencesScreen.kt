@@ -52,6 +52,7 @@ import app.gyrolet.mpvrx.presentation.Screen
 import app.gyrolet.mpvrx.ui.player.Debanding
 import app.gyrolet.mpvrx.ui.player.MPVProfile
 import app.gyrolet.mpvrx.ui.utils.LocalBackStack
+import app.gyrolet.mpvrx.ui.utils.LocalShowSettingsBackArrow
 import app.gyrolet.mpvrx.ui.utils.popSafely
 import app.gyrolet.mpvrx.ui.preferences.VulkanUtils
 import kotlinx.serialization.Serializable
@@ -83,12 +84,14 @@ object DecoderPreferencesScreen : Screen {
             )
           },
           navigationIcon = {
-            IconButton(onClick = { backstack.popSafely() }) {
-              Icon(
-                Icons.Default.ArrowBack,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.secondary,
-              )
+            if (LocalShowSettingsBackArrow.current) {
+              IconButton(onClick = { backstack.popSafely() }) {
+                Icon(
+                  Icons.Default.ArrowBack, 
+                  contentDescription = null,
+                  tint = MaterialTheme.colorScheme.secondary,
+                )
+              }
             }
           },
         )
