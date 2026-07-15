@@ -56,6 +56,7 @@ import app.gyrolet.mpvrx.preferences.SubtitlesPreferences
 import app.gyrolet.mpvrx.preferences.preference.collectAsState
 import app.gyrolet.mpvrx.presentation.Screen
 import app.gyrolet.mpvrx.ui.utils.LocalBackStack
+import app.gyrolet.mpvrx.ui.utils.LocalShowSettingsBackArrow
 import app.gyrolet.mpvrx.ui.utils.popSafely
 import app.gyrolet.mpvrx.utils.media.copyFontsFromDirectory
 import app.gyrolet.mpvrx.utils.media.loadCustomFontEntries
@@ -148,14 +149,16 @@ object SubtitlesPreferencesScreen : Screen {
             )
           },
           navigationIcon = {
-            IconButton(
-              onClick = { backstack.popSafely() },
-            ) {
-              Icon(
-                Icons.Outlined.ArrowBack,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.secondary,
-              )
+            if (LocalShowSettingsBackArrow.current) {
+              IconButton(
+                onClick = { backstack.popSafely() },
+              ) {
+                Icon(
+                  Icons.Outlined.ArrowBack, 
+                  contentDescription = null,
+                  tint = MaterialTheme.colorScheme.secondary,
+                )
+              }
             }
           },
         )

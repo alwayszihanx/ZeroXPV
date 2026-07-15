@@ -52,6 +52,7 @@ import app.gyrolet.mpvrx.R
 import app.gyrolet.mpvrx.presentation.Screen
 import app.gyrolet.mpvrx.ui.theme.LocalEmphasizedTypography
 import app.gyrolet.mpvrx.ui.utils.LocalBackStack
+import app.gyrolet.mpvrx.ui.utils.LocalShowSettingsBackArrow
 import app.gyrolet.mpvrx.ui.utils.popSafely
 import kotlinx.serialization.Serializable
 
@@ -101,7 +102,8 @@ object PreferencesScreen : Screen {
             @Suppress("UNCHECKED_CAST")
             val detailBackstack = rememberNavBackStack(selectedScreen) as NavBackStack<Screen>
             CompositionLocalProvider(
-              LocalBackStack provides detailBackstack
+              LocalBackStack provides detailBackstack,
+              LocalShowSettingsBackArrow provides (detailBackstack.size > 1)
             ) {
               val activeScreen = detailBackstack.lastOrNull() ?: selectedScreen
               key(activeScreen) {

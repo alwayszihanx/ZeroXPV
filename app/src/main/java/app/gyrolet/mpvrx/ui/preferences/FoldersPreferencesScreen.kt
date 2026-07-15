@@ -62,6 +62,7 @@ import app.gyrolet.mpvrx.ui.browser.components.BrowserTopBar
 import app.gyrolet.mpvrx.ui.browser.selection.SelectionState
 import app.gyrolet.mpvrx.ui.browser.states.EmptyState
 import app.gyrolet.mpvrx.ui.utils.LocalBackStack
+import app.gyrolet.mpvrx.ui.utils.LocalShowSettingsBackArrow
 import app.gyrolet.mpvrx.ui.utils.popSafely
 import app.gyrolet.mpvrx.utils.media.MediaLibraryEvents
 import kotlinx.coroutines.Dispatchers
@@ -123,7 +124,7 @@ object FoldersPreferencesScreen : Screen {
           selectedCount = selectionState.selectedCount,
           totalCount = blacklistedFoldersList.size,
           onCancelSelection = { selectionState = selectionState.clear() },
-          onBackClick = { backstack.popSafely() },
+          onBackClick = if (LocalShowSettingsBackArrow.current) { { backstack.popSafely() } } else null,
           onDeleteClick = {
             val updated = blacklistedFolders.toMutableSet().apply {
               removeAll(selectionState.selectedIds)

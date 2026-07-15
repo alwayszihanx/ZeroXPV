@@ -55,6 +55,7 @@ import app.gyrolet.mpvrx.presentation.components.ConfirmDialog
 import app.gyrolet.mpvrx.ui.preferences.components.ThemePicker
 import app.gyrolet.mpvrx.ui.theme.DarkMode
 import app.gyrolet.mpvrx.ui.utils.LocalBackStack
+import app.gyrolet.mpvrx.ui.utils.LocalShowSettingsBackArrow
 import app.gyrolet.mpvrx.ui.utils.popSafely
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toImmutableList
@@ -154,12 +155,14 @@ object AppearancePreferencesScreen : Screen {
                         )
                     },
                     navigationIcon = {
-                        IconButton(onClick = { backstack.popSafely() }) {
-                            Icon(
-                                Icons.Outlined.ArrowBack,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.secondary,
-                            )
+                        if (LocalShowSettingsBackArrow.current) {
+                            IconButton(onClick = { backstack.popSafely() }) {
+                                Icon(
+                                    Icons.Outlined.ArrowBack,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.secondary,
+                                )
+                            }
                         }
                     },
                 )
