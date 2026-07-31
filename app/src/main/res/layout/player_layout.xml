@@ -5,7 +5,7 @@
     android:background="@android:color/black"
     android:fitsSystemWindows="false">
 
-    <app.gyrolet.mpvrx.ui.player.MPVView
+    <io.alwayszihan.zeroxpv.ui.player.MPVView
         android:id="@+id/player"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />

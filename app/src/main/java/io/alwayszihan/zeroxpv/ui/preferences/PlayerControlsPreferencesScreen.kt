@@ -1,0 +1,423 @@
+package io.alwayszihan.zeroxpv.ui.preferences
+
+import io.alwayszihan.zeroxpv.ui.icons.Icon
+import io.alwayszihan.zeroxpv.ui.icons.Icons
+
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.dp
+import io.alwayszihan.zeroxpv.R
+import io.alwayszihan.zeroxpv.preferences.AppearancePreferences
+import io.alwayszihan.zeroxpv.preferences.PlayerButton
+import io.alwayszihan.zeroxpv.preferences.PlayerClockFormat
+import io.alwayszihan.zeroxpv.preferences.PlayerPreferences
+import io.alwayszihan.zeroxpv.preferences.PortraitPlaybackControlsPosition
+import io.alwayszihan.zeroxpv.preferences.SeekbarStyle
+import io.alwayszihan.zeroxpv.preferences.preference.collectAsState
+import io.alwayszihan.zeroxpv.presentation.Screen
+import io.alwayszihan.zeroxpv.ui.utils.LocalBackStack
+import io.alwayszihan.zeroxpv.ui.utils.LocalShowSettingsBackArrow
+import io.alwayszihan.zeroxpv.ui.utils.popSafely
+import kotlinx.serialization.Serializable
+import me.zhanghai.compose.preference.ListPreference
+import me.zhanghai.compose.preference.ProvidePreferenceLocals
+import io.alwayszihan.zeroxpv.ui.preferences.components.SwitchPreference
+import io.alwayszihan.zeroxpv.ui.player.controls.components.SeekbarStyleLivePreview
+import io.alwayszihan.zeroxpv.ui.preferences.components.PlayerButtonChip
+import org.koin.compose.koinInject
+
+// Enum to identify which region we are editing
+@Serializable
+enum class ControlRegion {
+  TOP_RIGHT,
+  BOTTOM_RIGHT,
+  BOTTOM_LEFT,
+  PORTRAIT_BOTTOM,
+}
+
+@Serializable
+object PlayerControlsPreferencesScreen : Screen {
+  @OptIn(ExperimentalMaterial3Api::class)
+  @Composable
+  override fun Content() {
+    val backstack = LocalBackStack.current
+    val appearancePrefs = koinInject<AppearancePreferences>()
+    val playerPrefs = koinInject<PlayerPreferences>()
+
+    // Get the current state for all four regions
+    val topRState by appearancePrefs.topRightControls.collectAsState()
+    val bottomRState by appearancePrefs.bottomRightControls.collectAsState()
+    val bottomLState by appearancePrefs.bottomLeftControls.collectAsState()
+    val portraitBottomState by appearancePrefs.portraitBottomControls.collectAsState()
+
+    val topRightButtons = remember(topRState) {
+      appearancePrefs.parseButtons(topRState, mutableSetOf())
+    }
+
+    val bottomRightButtons = remember(bottomRState) {
+      appearancePrefs.parseButtons(bottomRState, mutableSetOf())
+    }
+
+    val bottomLeftButtons = remember(bottomLState) {
+      appearancePrefs.parseButtons(bottomLState, mutableSetOf())
+    }
+
+    val portraitBottomButtons = remember(portraitBottomState) {
+      appearancePrefs.parseButtons(portraitBottomState, mutableSetOf())
+    }
+
+    Scaffold(
+      topBar = {
+        TopAppBar(
+          title = { 
+            Text(
+              text = stringResource(id = R.string.pref_layout_title),
+              style = MaterialTheme.typography.headlineSmall,
+              fontWeight = FontWeight.ExtraBold,
+              color = MaterialTheme.colorScheme.primary,
+            )
+          },
+          navigationIcon = {
+            if (LocalShowSettingsBackArrow.current) {
+              IconButton(onClick = { backstack.popSafely() }) {
+                Icon(
+                  Icons.Default.ArrowBack, 
+                  contentDescription = null,
+                  tint = MaterialTheme.colorScheme.secondary,
+                )
+              }
+            }
+          },
+        )
+      },
+    ) { padding ->
+      ProvidePreferenceLocals {
+        LazyColumn(
+          modifier =
+            Modifier
+              .fillMaxSize()
+              .padding(padding),
+        ) {
+          // Landscape Controls Section
+          item {
+            PreferenceSectionHeader(title = stringResource(R.string.pref_section_landscape_controls))
+          }
+          
+          item {
+            PreferenceCard {
+              PreferenceCategoryWithEditButton(
+                title = stringResource(id = R.string.pref_layout_top_right_controls),
+                onClick = {
+                  backstack.add(ControlLayoutEditorScreen(ControlRegion.TOP_RIGHT))
+                },
+              )
+              PreferenceIconSummary(buttons = topRightButtons)
+              
+              PreferenceDivider()
+              
+              PreferenceCategoryWithEditButton(
+                title = stringResource(id = R.string.pref_layout_bottom_right_controls),
+                onClick = {
+                  backstack.add(ControlLayoutEditorScreen(ControlRegion.BOTTOM_RIGHT))
+                },
+              )
+              PreferenceIconSummary(buttons = bottomRightButtons)
+              
+              PreferenceDivider()
+              
+              PreferenceCategoryWithEditButton(
+                title = stringResource(id = R.string.pref_layout_bottom_left_controls),
+                onClick = {
+                  backstack.add(ControlLayoutEditorScreen(ControlRegion.BOTTOM_LEFT))
+                },
+              )
+              PreferenceIconSummary(buttons = bottomLeftButtons)
+            }
+          }
+          
+          // Portrait Controls Section
+          item {
+            PreferenceSectionHeader(title = stringResource(R.string.pref_section_portrait_controls))
+          }
+
+          item {
+            PreferenceCard {
+
+            
+              PreferenceCategoryWithEditButton(
+                title = stringResource(id = R.string.pref_layout_portrait_bottom_controls),
+                onClick = {
+                  backstack.add(ControlLayoutEditorScreen(ControlRegion.PORTRAIT_BOTTOM))
+                },
+              )
+              PreferenceIconSummary(buttons = portraitBottomButtons)
+            }
+          }
+          
+          // Seekbar Section
+          item {
+            PreferenceSectionHeader(title = stringResource(R.string.pref_section_seekbar_style))
+          }
+
+          item {
+            val seekbarStyle by appearancePrefs.seekbarStyle.collectAsState()
+            
+            PreferenceCard {
+              SeekbarStyle.entries.forEachIndexed { index, style ->
+                ListItem(
+                  headlineContent = {
+                    Text(text = style.name)
+                  },
+                  supportingContent = {
+                    SeekbarStyleLivePreview(
+                      style = style,
+                      modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 6.dp, bottom = 2.dp),
+                    )
+                  },
+                  trailingContent = {
+                    RadioButton(
+                      selected = seekbarStyle == style,
+                      onClick = null
+                    )
+                  },
+                  colors = androidx.compose.material3.ListItemDefaults.colors(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                  ),
+                  modifier = Modifier
+                    .clickable { appearancePrefs.seekbarStyle.set(style) }
+                )
+                if (index < SeekbarStyle.entries.size - 1) {
+                  PreferenceDivider()
+                }
+              }
+            }
+          }
+          
+          // Appearance Section
+          item {
+            PreferenceSectionHeader(title = stringResource(R.string.pref_section_player_controls_appearance))
+          }
+          
+          item {
+            val portraitPlaybackControlsPosition by
+              appearancePrefs.portraitPlaybackControlsPosition.collectAsState()
+            val playerTimeToDisappear by playerPrefs.playerTimeToDisappear.collectAsState()
+            val clockFormat by playerPrefs.clockFormat.collectAsState()
+            val predefinedTimeValues = listOf(500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000)
+            val isCustomTimeValue = !predefinedTimeValues.contains(playerTimeToDisappear)
+            
+            var showCustomTimeDialog by remember { mutableStateOf(false) }
+            var customTimeValue by remember { mutableStateOf("") }
+            
+            PreferenceCard {
+              ListPreference(
+                value = portraitPlaybackControlsPosition,
+                onValueChange = { appearancePrefs.portraitPlaybackControlsPosition.set(it) },
+                values = PortraitPlaybackControlsPosition.entries,
+                valueToText = { AnnotatedString(it.displayName) },
+                title = { Text("Portrait playback buttons") },
+                summary = { Text(portraitPlaybackControlsPosition.displayName) },
+              )
+
+              PreferenceDivider()
+
+              PreferenceDivider()
+              
+              ListPreference(
+                value = if (isCustomTimeValue) -1 else playerTimeToDisappear,
+                onValueChange = { newValue ->
+                  if (newValue == -1) {
+                    customTimeValue = playerTimeToDisappear.toString()
+                    showCustomTimeDialog = true
+                  } else {
+                    playerPrefs.playerTimeToDisappear.set(newValue)
+                  }
+                },
+                values = predefinedTimeValues + listOf(-1),
+                valueToText = { value ->
+                  if (value == -1) {
+                    AnnotatedString(stringResource(R.string.pref_gesture_double_tap_custom))
+                  } else {
+                    AnnotatedString(stringResource(R.string.pref_time_ms_summary, value))
+                  }
+                },
+                title = { Text(text = stringResource(R.string.pref_player_display_hide_player_control_time)) },
+                summary = {
+                  Text(
+                    text = if (isCustomTimeValue) {
+                      stringResource(R.string.pref_custom_time_summary_format, playerTimeToDisappear)
+                    } else {
+                      stringResource(R.string.pref_time_ms_summary, playerTimeToDisappear)
+                    },
+                  )
+                },
+              )
+
+              PreferenceDivider()
+
+              ListPreference(
+                value = clockFormat,
+                onValueChange = { playerPrefs.clockFormat.set(it) },
+                values = PlayerClockFormat.entries,
+                valueToText = { AnnotatedString(it.displayName) },
+                title = { Text("Time + Network clock") },
+                summary = { Text(clockFormat.displayName) },
+              )
+            }
+            
+            if (showCustomTimeDialog) {
+              AlertDialog(
+                onDismissRequest = { showCustomTimeDialog = false },
+                title = { Text(text = stringResource(R.string.pref_player_display_hide_player_control_time)) },
+                text = {
+                  Column(
+                    modifier = Modifier
+                      .fillMaxWidth()
+                      .verticalScroll(rememberScrollState()),
+                  ) {
+                    Text(
+                      text = stringResource(R.string.pref_custom_time_dialog_text),
+                      modifier = Modifier.padding(bottom = 8.dp),
+                    )
+                    OutlinedTextField(
+                      value = customTimeValue,
+                      onValueChange = { customTimeValue = it },
+                      label = { Text(stringResource(R.string.pref_custom_time_label)) },
+                      keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                      modifier = Modifier.fillMaxWidth(),
+                      singleLine = true,
+                    )
+                  }
+                },
+                confirmButton = {
+                  TextButton(
+                    onClick = {
+                      val value = customTimeValue.toIntOrNull()
+                      if (value != null && value in 100..1000000000000) {
+                        playerPrefs.playerTimeToDisappear.set(value)
+                        showCustomTimeDialog = false
+                      }
+                    },
+                  ) {
+                    Text(stringResource(R.string.generic_ok))
+                  }
+                },
+                dismissButton = {
+                  TextButton(onClick = { showCustomTimeDialog = false }) {
+                    Text(stringResource(R.string.generic_cancel))
+                  }
+                },
+              )
+            }
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Custom composable for the category header with an Edit button.
+   */
+  @Composable
+  private fun PreferenceCategoryWithEditButton(
+    title: String,
+    onClick: () -> Unit,
+  ) {
+    Row(
+      modifier =
+        Modifier
+          .fillMaxWidth()
+          .padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+      // Apply padding to Row - minimal padding for tighter appearance
+      verticalAlignment = Alignment.CenterVertically, // Align items vertically
+    ) {
+      Text(
+        text = title,
+        style = MaterialTheme.typography.bodyLarge,
+        color = MaterialTheme.colorScheme.onSurface,
+        modifier = Modifier.weight(1f), // Text takes all available space, pushing button to end
+      )
+      IconButton(onClick = onClick) {
+        Icon(
+          imageVector = Icons.Outlined.Edit,
+          contentDescription = stringResource(R.string.pref_edit_region_content_desc, title),
+          tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      }
+    }
+  }
+
+  /**
+   * Custom composable to show a row of icons for the summary.
+   */
+  @OptIn(ExperimentalLayoutApi::class)
+  @Composable
+  private fun PreferenceIconSummary(buttons: List<PlayerButton>) {
+    FlowRow(
+      modifier =
+        Modifier
+          .fillMaxWidth()
+          .padding(horizontal = 16.dp, vertical = 8.dp),
+      horizontalArrangement = Arrangement.spacedBy(8.dp), // Increased spacing
+      verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterVertically),
+    ) {
+      if (buttons.isEmpty()) {
+        Text(
+          stringResource(R.string.pref_none),
+          style = MaterialTheme.typography.bodyMedium,
+          color = MaterialTheme.colorScheme.outline,
+        )
+      } else {
+        buttons.forEach { button ->
+          // Use the chip in "preview mode" (no badge, enabled=true but no onClick)
+          PlayerButtonChip(
+            button = button,
+            enabled = true,
+            onClick = null, 
+            badgeIcon = null,
+            badgeColor = null
+          )
+        }
+      }
+    }
+  }
+}
+

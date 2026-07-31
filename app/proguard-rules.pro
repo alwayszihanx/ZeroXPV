@@ -26,16 +26,18 @@
 -dontnote org.xmlpull.v1.**
 -dontwarn org.slf4j.impl.StaticLoggerBinder
 
-# SMBJ ProGuard Rules
-# Keep SMBJ classes
--keep class com.hierynomus.smbj.** { *; }
--keep class com.hierynomus.mssmb2.** { *; }
--keep class com.hierynomus.msdtyp.** { *; }
--keep class com.hierynomus.msfscc.** { *; }
--keep class com.hierynomus.protocol.** { *; }
--keep class com.hierynomus.spnego.** { *; }
--keep class com.hierynomus.ntlm.** { *; }
--keep class com.hierynomus.security.** { *; }
+# SMBJ ProGuard Rules - Targeted keeps for used classes only
+-keep class com.hierynomus.smbj.SMBClient { *; }
+-keep class com.hierynomus.smbj.SmbConfig { *; }
+-keep class com.hierynomus.smbj.auth.AuthenticationContext { *; }
+-keep class com.hierynomus.smbj.connection.Connection { *; }
+-keep class com.hierynomus.smbj.session.Session { *; }
+-keep class com.hierynomus.smbj.share.DiskShare { *; }
+-keep class com.hierynomus.smbj.transport.tcp.async.AsyncDirectTcpTransportFactory { *; }
+-keep class com.hierynomus.msdtyp.AccessMask { *; }
+-keep class com.hierynomus.mssmb2.SMB2CreateDisposition { *; }
+-keep class com.hierynomus.mssmb2.SMB2ShareAccess { *; }
+-keep class com.hierynomus.msfscc.fileinformation.FileIdBothDirectoryInformation { *; }
 
 # JGSS (Kerberos/SPNEGO) - Optional, not needed for basic NTLM auth
 # These are used for domain authentication, which we don't use
@@ -48,15 +50,20 @@
 -dontwarn javax.el.**
 -dontnote javax.el.**
 
-# Keep MBassador core classes
--keep class net.engio.mbassy.** { *; }
+# MBassador (event bus used by SMBJ) - keep core classes only
+-keep class net.engio.mbassy.bus.** { *; }
+-keep class net.engio.mbassy.listener.** { *; }
+-dontwarn net.engio.mbassy.dispatch.el.**
+-dontnote net.engio.mbassy.dispatch.el.**
 
-# BouncyCastle (crypto provider used by SMBJ)
--keep class org.bouncycastle.** { *; }
+# BouncyCastle (crypto provider used by SMBJ) - keep provider registration only
+-keep class org.bouncycastle.jce.provider.BouncyCastleProvider { *; }
+-keep class org.bouncycastle.jcajce.provider.** { *; }
 -dontwarn org.bouncycastle.**
 
-# ASN.1 classes
--keep class com.hierynomus.asn1.** { *; }
+# ASN.1 classes - keep only what's used
+-keep class com.hierynomus.asn1.Asn1Object { *; }
+-keep class com.hierynomus.asn1.structures.** { *; }
 
 # Keep all classes that use reflection or are loaded dynamically
 -keepattributes Signature

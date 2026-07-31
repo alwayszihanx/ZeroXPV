@@ -153,3 +153,4 @@ lint/tmp/
 # Profiling
 # =========================
 *.hprof
+zeroxpv_logs.txt

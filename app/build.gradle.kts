@@ -12,16 +12,36 @@ plugins {
   alias(libs.plugins.room)
 }
 
+kotlin {
+  jvmToolchain(17)
+}
+
 android {
-  namespace = "app.gyrolet.mpvrx"
+  namespace = "io.alwayszihan.zeroxpv"
   compileSdk = 37
 
+  signingConfigs {
+    create("release") {
+      val propsFile = rootProject.file("keystore.properties")
+      if (propsFile.exists()) {
+        val props = propsFile.readLines().mapNotNull { line ->
+          val idx = line.indexOf('=')
+          if (idx > 0) line.substring(0, idx).trim() to line.substring(idx + 1).trim() else null
+        }.toMap()
+        storeFile = rootProject.file(props["storefile"] as String)
+        storePassword = props["storepass"] as String
+        keyAlias = props["keyalias"] as String
+        keyPassword = props["keypass"] as String
+      }
+    }
+  }
+
   defaultConfig {
-    applicationId = "app.gyrolet.mpvrx"
+    applicationId = "io.alwayszihan.zeroxpv"
     minSdk = 26
     targetSdk = 36
-    versionCode = 152
-    versionName = "1.5.0-preview.4"
+    versionCode = 254
+    versionName = "2.5.4"
 
     vectorDrawables {
       useSupportLibrary = true
@@ -32,7 +52,7 @@ android {
 
     externalNativeBuild {
       cmake {
-        abiFilters += listOf("arm64-v8a", "armeabi-v7a") + x86Abis
+        abiFilters += listOf("arm64-v8a") + x86Abis
       }
     }
   }
@@ -63,11 +83,11 @@ android {
     abi {
       isEnable = true
       reset()
-      include("armeabi-v7a", "arm64-v8a")
+      include("arm64-v8a")
       if (enableX86) {
         include("x86", "x86_64")
       }
-      isUniversalApk = true
+      isUniversalApk = false
     }
   }
 
@@ -79,6 +99,8 @@ android {
         getDefaultProguardFile("proguard-android-optimize.txt"),
         "proguard-rules.pro"
       )
+      signingConfig = signingConfigs.getByName("release").takeIf { it.storeFile != null }
+        ?: signingConfigs.getByName("debug")
       ndk {
         debugSymbolLevel = "none"
       }
@@ -94,7 +116,7 @@ android {
     named("debug") {
       applicationIdSuffix = ".debug"
       versionNameSuffix = "-${getCommitCount()}"
-      resValue("string", "app_name", "MpvRx-Debug")
+      resValue("string", "app_name", "ZeroXPV-Debug")
     }
   }
 
@@ -140,7 +162,6 @@ android {
 
 androidComponents {
   val abiCodes = mutableMapOf(
-    "armeabi-v7a" to 1,
     "arm64-v8a" to 2
   )
   if (enableX86) {
@@ -198,8 +219,8 @@ dependencies {
   implementation(libs.androidx.compose.constraintlayout)
   implementation(libs.androidx.preference.ktx)
   implementation(libs.androidx.constraintlayout)
-  implementation(libs.composables.material.symbols.rounded.filled.android)
-  implementation(libs.composables.material.symbols.rounded.filled.cmp)
+  // implementation(libs.composables.material.symbols.rounded.filled.android)
+  // implementation(libs.composables.material.symbols.rounded.filled.cmp)
   implementation(libs.androidx.compose.animation.graphics)
   implementation(libs.mediasession)
   implementation(libs.androidx.documentfile)
@@ -250,6 +271,7 @@ dependencies {
   implementation(libs.nanohttpd)
   implementation(libs.lazycolumnscrollbar)
   implementation(libs.reorderable)
+  implementation(libs.bundles.iptv.media3)
 }
 
 /* ---------------- Git helpers ---------------- */
@@ -264,7 +286,7 @@ fun runCommand(command: String): String? =
   try {
     val parts = command.split(' ')
     val process = ProcessBuilder(parts)
-      .redirectErrorStream(true)
+      .redirectErrorStream(false)
       .start()
 
     val output = process.inputStream
@@ -273,7 +295,7 @@ fun runCommand(command: String): String? =
       .trim()
 
     process.waitFor()
-    output.ifEmpty { null }
+    if (process.exitValue() != 0) null else output.ifEmpty { null }
   } catch (e: Exception) {
     null
   }

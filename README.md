@@ -1,71 +1,46 @@
-<p align="center">
-  <img src="fastlane\metadata\android\en-US\images\icon.png" width="250" height="250" />
-</p>
-
-<h1 align="center">MpvRx</h1>
-
-<p align="center">
-  <b>Feature-rich, Efficient Powerful Android video player based on libmpv.</b>
-  <br>
-  <i>No ads. No trackers. No noise. Just a serious video player with a calmer surface and a sharper edge.</i>
-</p>
-
-> [!IMPORTANT]
-> ## MPV RX — Final Release Notice (Jun 04 2026)
->
-> **MPV RX has reached its final stage of development.**
->
-> Version **1.4.1** marks the **last and final release** of this project. From this point onward, there will be **no new features, major additions, or active development**.
->
-> I know that a few things may still be partially implemented, but most of the major features have already reached their final stage and are working properly. The player has grown a lot, and at this point, MPV RX is in the best shape it was meant to be.
->
-> Future updates will only happen when something important breaks, such as API endpoints, compatibility issues, or critical fixes. Even then, updates will only be handled if I have the time.
->
-> Also, sometimes watching the video normally is necessary too — not every tiny bug needs a courtroom case, a 40-line issue report, and emotional damage. 😭  
-> Enjoy the player, enjoy your movies, and let MPV RX do what it was made for.
->
-> Thank you so much for all the support, feedback, issue reports, suggestions, and love throughout this journey. You helped this project become **<ins>one of the most feature-packed video players on the internet.</ins>**
->
-> I hope this repository reaches an even greater audience someday.
->
-> **Thank you for everything! ❤️**
-
-
-<p align="center">
-  <img src="https://img.shields.io/badge/Platform-Android-brightgreen.svg" />
-  <img src="https://img.shields.io/badge/License-Apache--2.0-blue.svg" />
-  <img src="https://img.shields.io/github/v/release/Riteshp2001/mpvRx.svg?logo=github&label=Release&cacheSeconds=3600" />
-  <img src="https://img.shields.io/github/downloads/Riteshp2001/mpvRx/total?logo=github&cacheSeconds=3600" />
-</p>
-
----
-
-## Showcase
-
 <div align="center">
-  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/player.png" width="92%">
-</div>
 
-<br>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="fastlane\metadata\android\en-US\images\icon.png" />
+  <img src="fastlane\metadata\android\en-US\images\icon.png" width="120" height="120" />
+</picture>
 
-<div align="center">
-  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/videoscreen.png" width="31%">
-  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/pip.png" width="31%">
-  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/about.jpg" width="31%">
-</div>
+# ⚡ ZeroXPV
 
-<br>
+**Feature-rich, efficient, powerful Android video player based on libmpv.**
 
-<div align="center">
-  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/playlistwindow.png" width="48%">
-  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/chapters.png" width="48%">
+_No ads. No trackers. No noise. Just a serious video player with a calmer surface and a sharper edge._
+
+[![License](https://img.shields.io/badge/License-Apache--2.0-blue?style=for-the-badge)](#license)
+[![Platform](https://img.shields.io/badge/Platform-Android-brightgreen?style=for-the-badge)](#)
+[![Release](https://img.shields.io/github/v/release/alwayszihanx/ZeroXPV.svg?logo=github&label=Release&cacheSeconds=3600)](#releases)
+[![Downloads](https://img.shields.io/github/downloads/alwayszihanx/ZeroXPV/total?logo=github&label=Downloads&cacheSeconds=3600)](#)
+
 </div>
 
 ---
 
-## Features
+## 📖 Table of Contents
 
-MpvRx pushes the mpv-android experience further with deep customization, thermal-aware performance, and unique quality-of-life features. Here's what sets it apart:
+- [✨ Features](#-features)
+- [📱 Screenshots](#-screenshots)
+- [🔋 Battery Guide](#-battery-optimization-guide)
+- [📥 Download](#-download)
+- [🏗️ Build](#️-build)
+- [📝 Release Notes For Maintainers](#-release-notes-for-maintainers)
+- [🙏 Acknowledgments](#-acknowledgments)
+- [📄 License](#-license)
+- [⭐ Star History](#-star-history)
+
+---
+
+<div align="center">
+
+## ✨ Features
+
+ZeroXPV pushes the mpv-android experience further with deep customization, thermal-aware performance, and unique quality-of-life features.
+
+</div>
 
 <details close>
 <summary><b>🎨 Theme & Visual System</b></summary>
@@ -226,19 +201,6 @@ MpvRx pushes the mpv-android experience further with deep customization, thermal
 
 </details>
 
-<details close>
-<summary><b>🤖 AI Integration</b></summary>
-
-| Feature | Description |
-|---|---|
-| **Provider Support** | OpenAI, Anthropic, Groq, OpenRouter, Together, and OpenCode Zen with provider-specific models and API protocols |
-| **AI Subtitle Translation** | Translate subtitles with custom prompts |
-| **AI Subtitle Formatting** | Reformat subtitle styling with custom prompts |
-| **AI File Renaming** | Bulk rename video files with custom rename prompts |
-| **Reasoning-Safe Parsing** | Removes reasoning blocks and code fences while accepting structured provider responses and citations |
-| **Speech Providers** | Cloud transcription plus experimental offline Whisper subtitle generation |
-
-</details>
 
 <details close>
 <summary><b>📜 Scripting & Editor</b></summary>
@@ -282,41 +244,61 @@ MpvRx pushes the mpv-android experience further with deep customization, thermal
 
 ---
 
-## 🔋 Battery Optimization guide for Mpv
+<div align="center">
 
-First Pro Tip Keep Mpv Conf empty if you are newbie
+## 📱 Screenshots
 
-- **Use `gpu` not `gpu-next`** — gpu-next is a Vulkan-based renderer that keeps the GPU awake for no reason when playing normal video. The classic `gpu` backend is lighter and uses the OpenGL driver stack, which on most Android devices has better power characteristics.
-- **Disable Vulkan entirely.** Vulkan is great for Video Playback but also Heavy.
-- **Use the `fast` mpv profile.** It's literally built into mpvRx use that Mpv Profiles and Set it to Default  or in _mpv.conf_ `profile=fast`
-- **Don't use shaders.** That Anime4K preset you using that's what's eating your battery. Shaders run on the GPU every single frame. If you're watching 24fps content and you have a shader pipeline running, congratulations — you're doing 24 unnecessary GPU compute passes per second for a Minute amount of visible benefit on a phone screen .
-- **Don't use AI-generated configs.** That means you, the person who copied a Reddit config with 200 lines of `scale=ewa_lanczossharp` and `dscale=mitchell` and `cscale=sinc` and a dozen `glsl-shaders` entries. Most  of You have no idea what any of those do. You just made your phone render video like it's preparing for a 4K cinema projection. On a 6-inch screen. Grow some Brains Its your android Phone not some Fuckin.. 4k Television
+</div>
 
-**My POV:** mpv's default config with `profile=fast` and the `gpu` backend plays video with negligible battery impact — often **less** than OEM players because mpv doesn't have a billion proprietary DRM modules, analytics SDKs, and ad frameworks burning CPU in the background. The next time your battery drops more than 20-25% watching a 2-hour movie, don't blame mpv. Blame the 14 shaders you blindly copy-pasted.
+<div align="center">
+  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/player.png" width="92%">
+</div>
 
-_Just a Pro tip if your battery consumption stays within 200 mAh and belwo 0.9W ( See Page 6 of MpvRx - video player More Settings -> Page6) useage than ur Mpv Conf are Proper for Video watching thats what i have experimented and telling rest all i don't know About in detail technicality's if anyone wanna tell me In depth guide then keep it to yourself i dont wanna listen_
+<br>
+
+<div align="center">
+  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/videoscreen.png" width="31%">
+  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/pip.png" width="31%">
+  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/about.png" width="31%">
+  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/iptv.png" width="31%">
+</div>
+
+<br>
+
+<div align="center">
+  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/playlistwindow.png" width="48%">
+  <img src="fastlane/metadata/android/en-US/images/phoneScreenshots/chapters.png" width="48%">
+</div>
+
+---
+
+## 🔋 Battery Optimization Guide for Mpv
+
+> First Pro Tip: Keep Mpv Conf empty if you are new.
+
+- **Use `gpu` not `gpu-next`** — The Vulkan-based renderer keeps the GPU awake for no reason when playing normal video. The classic `gpu` backend is lighter and uses the OpenGL driver stack, which has better power characteristics on most Android devices.
+- **Disable Vulkan entirely** — Great for video playback but heavy on resources.
+- **Use the `fast` mpv profile** — It's built into ZeroXPV. Set it as default in `_mpv.conf` with `profile=fast`.
+- **Don't use shaders** — That Anime4K preset is what's eating your battery. Shaders run on the GPU every single frame. At 24fps, that's 24 unnecessary GPU compute passes per second for minimal visible benefit on a phone screen.
+- **Don't use AI-generated configs** — If you copied a Reddit config with 200 lines of `scale=ewa_lanczossharp` and `dscale=mitchell` and a dozen `glsl-shaders` entries, you're just making your phone render video like it's preparing for a 4K cinema projection on a 6-inch screen.
+
+> **My POV:** mpv's default config with `profile=fast` and the `gpu` backend plays video with negligible battery impact — often **less** than OEM players because mpv doesn't have a billion proprietary DRM modules, analytics SDKs, and ad frameworks burning CPU in the background.
 
 ---
 
 <div align="center">
-  <a href="https://github.com/Riteshp2001/mpvRx/releases">
-    <img src="https://img.shields.io/badge/Download-Stable_Release-blue?style=for-the-badge&logo=github" alt="Stable Release">
-  </a>
-  <!-- <a href="https://riteshp2001.github.io/mpvRx/">
-    <img src="https://img.shields.io/badge/Download-Preview_Build-orange?style=for-the-badge&logo=github" alt="Preview Build">
-  </a> -->
+
+## 📥 Download
+
+[![Stable Release](https://img.shields.io/badge/Download-Stable_Release-blue?style=for-the-badge&logo=github)](https://github.com/alwayszihanx/ZeroXPV/releases)
+
 </div>
 
-<!-- <div align="center">
-  <i>Note: Previews may be unstable and are intended for testing purposes only.</i>
-</div> -->
-
-If something breaks, feels off, or deserves another pass, _don't be Dumb and ask for Trash Features which only you require it wll be auto deleted_, 
-report it in the [Issues](https://github.com/Riteshp2001/mpvRx/issues).
+If something breaks, feels off, or deserves another pass, report it in the [Issues](https://github.com/alwayszihanx/ZeroXPV/issues).
 
 ---
 
-## Build
+## 🏗️ Build
 
 ### Requirements
 
@@ -348,33 +330,7 @@ report it in the [Issues](https://github.com/Riteshp2001/mpvRx/issues).
 
 ---
 
-## Support
-
-If you find MpvRx useful and would like to support its development, consider buying me a coffee! Your support keeps the project alive and helps push new features.
-
-<div align="center">
-
-### ☕ Buy Me a Coffee
-
-<a href="https://www.buymeacoffee.com/riteshp2001">
-  <img src="https://img.shields.io/badge/Buy_Me_A_Coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black" alt="Buy Me a Coffee">
-</a>
-
-### UPI
-
-`panditritesh2001@okhdfcbank`
-
-<a href="upi://pay?pa=panditritesh2001@okhdfcbank&pn=Ritesh%20Pandit&cu=INR">
-  <img src="fastlane/metadata/android/en-US/images/upiqr-code.svg" width="250" height="250" alt="UPI QR Code">
-</a>
-
-Scan with any UPI app (Google Pay, PhonePe, Paytm, BHIM)
-
-</div>
-
----
-
-## Release Notes For Maintainers
+## 📝 Release Notes For Maintainers
 
 To cut a signed GitHub release through Actions, configure these repository secrets:
 
@@ -401,12 +357,12 @@ git push origin v1.3.1-preview.1
 
 ---
 
-## Acknowledgments
+## 🙏 Acknowledgments
 
 - [mpv-android](https://github.com/mpv-android)
 - [mpvExtended](https://github.com/marlboro-advance/mpvEx)
 - [mpvKt](https://github.com/abdallahmehiz/mpvKt)
-- [PixelPlayer](https://github.com/theovilardo/PixelPlayer) 
+- [PixelPlayer](https://github.com/theovilardo/PixelPlayer)
 - [MpvRex](https://github.com/sfsakhawat999/mpvRex)
 - [Next Player](https://github.com/anilbeesetti/nextplayer)
 - [Gramophone](https://github.com/FoedusProgramme/Gramophone)
@@ -415,18 +371,18 @@ git push origin v1.3.1-preview.1
 
 ---
 
-## License
+## 📄 License
 
 Distributed under the **Apache License 2.0**. See `LICENSE` for more information.
 
 ---
 
-## Star History
+## ⭐ Star History
 
-<a href="https://www.star-history.com/#Riteshp2001/mpvRx&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Riteshp2001/mpvRx&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Riteshp2001/mpvRx&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Riteshp2001/mpvRx&type=date&legend=top-left" />
- </picture>
+<a href="https://www.star-history.com/#alwayszihanx/ZeroXPV&type=date&legend=top-left">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=alwayszihanx/ZeroXPV&type=date&theme=dark&legend=top-left" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=alwayszihanx/ZeroXPV&type=date&legend=top-left" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=alwayszihanx/ZeroXPV&type=date&legend=top-left" />
+  </picture>
 </a>
