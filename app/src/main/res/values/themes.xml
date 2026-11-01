@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <style name="Theme.zeroxpv" parent="Theme.Material3.DynamicColors.DayNight.NoActionBar" />
+
+    <style name="Theme.zeroxpv.Player" parent="Theme.zeroxpv">
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
+</resources>
+

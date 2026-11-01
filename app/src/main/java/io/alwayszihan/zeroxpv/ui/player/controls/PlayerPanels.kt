@@ -1,0 +1,87 @@
+package io.alwayszihan.zeroxpv.ui.player.controls
+
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.material3.CardColors
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import io.alwayszihan.zeroxpv.ui.player.Panels
+import io.alwayszihan.zeroxpv.ui.player.PlayerViewModel
+import io.alwayszihan.zeroxpv.ui.player.controls.components.panels.AudioDelayPanel
+import io.alwayszihan.zeroxpv.ui.player.controls.components.panels.HdrScreenOutputPanel
+import io.alwayszihan.zeroxpv.ui.player.controls.components.panels.LuaScriptsPanel
+import io.alwayszihan.zeroxpv.ui.player.controls.components.panels.SubtitleDelayPanel
+import io.alwayszihan.zeroxpv.ui.player.controls.components.panels.SubtitleSettingsPanel
+import io.alwayszihan.zeroxpv.ui.player.controls.components.panels.VideoSettingsPanel
+
+@Composable
+fun PlayerPanels(
+  panelShown: Panels,
+  viewModel: PlayerViewModel,
+  onDismissRequest: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  AnimatedContent(
+    targetState = panelShown,
+    label = "panels",
+    contentAlignment = Alignment.CenterEnd,
+    contentKey = { it.name },
+    transitionSpec = {
+      fadeIn() + slideInHorizontally { it / 3 } togetherWith fadeOut() + slideOutHorizontally { it / 2 }
+    },
+    modifier = modifier,
+  ) { currentPanel ->
+    when (currentPanel) {
+      Panels.None -> {
+        Box(Modifier.fillMaxHeight())
+      }
+      Panels.SubtitleSettings -> {
+        SubtitleSettingsPanel(
+          viewModel = viewModel,
+          onDismissRequest = onDismissRequest,
+        )
+      }
+      Panels.SubtitleDelay -> {
+        SubtitleDelayPanel(onDismissRequest)
+      }
+      Panels.AudioDelay -> {
+        AudioDelayPanel(onDismissRequest)
+      }
+      Panels.VideoFilters -> {
+        VideoSettingsPanel(onDismissRequest)
+      }
+      Panels.LuaScripts -> {
+        LuaScriptsPanel(onDismissRequest)
+      }
+      Panels.HdrScreenOutput -> {
+        HdrScreenOutputPanel(
+          viewModel = viewModel,
+          onDismissRequest = onDismissRequest,
+        )
+      }
+    }
+  }
+}
+
+val CARDS_MAX_WIDTH = 420.dp
+val panelCardsColors: @Composable () -> CardColors = {
+  // Higher alpha for better readability in panels (less transparent)
+  val alpha = 0.85f
+
+  CardDefaults.cardColors(
+    containerColor = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = alpha),
+    contentColor = MaterialTheme.colorScheme.onSurface,
+    disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = alpha),
+    disabledContentColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+  )
+}

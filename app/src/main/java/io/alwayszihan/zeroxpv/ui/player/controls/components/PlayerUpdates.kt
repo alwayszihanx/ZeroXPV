@@ -1,0 +1,136 @@
+package io.alwayszihan.zeroxpv.ui.player.controls.components
+
+import io.alwayszihan.zeroxpv.ui.icons.Icon
+import io.alwayszihan.zeroxpv.ui.icons.Icons
+
+import androidx.compose.animation.animateContentSize
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.dp
+import io.alwayszihan.zeroxpv.R
+import io.alwayszihan.zeroxpv.ui.theme.spacing
+
+private val tabularFigures = "tnum"
+
+@Composable
+fun PlayerUpdate(
+  modifier: Modifier = Modifier,
+  content: @Composable () -> Unit = {},
+) {
+  Surface(
+    shape = CircleShape,
+    color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.55f),
+    contentColor = MaterialTheme.colorScheme.onSurface,
+    tonalElevation = 0.dp,
+    shadowElevation = 0.dp,
+    border = BorderStroke(
+      1.dp,
+      MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
+    ),
+    modifier = modifier
+      .height(45.dp)
+      .animateContentSize(),
+  ) {
+    Box(
+      modifier = Modifier.padding(
+        vertical = MaterialTheme.spacing.small,
+        horizontal = MaterialTheme.spacing.medium,
+      ),
+      contentAlignment = Alignment.Center,
+    ) {
+      content()
+    }
+  }
+}
+
+@Composable
+fun TextPlayerUpdate(
+  text: String,
+  modifier: Modifier = Modifier,
+) {
+  val stableTextStyle = MaterialTheme.typography.bodyMedium.copy(fontFeatureSettings = tabularFigures)
+  PlayerUpdate(modifier) {
+    Text(
+      text = text,
+      fontWeight = FontWeight.Bold,
+      textAlign = TextAlign.Center,
+      color = MaterialTheme.colorScheme.onSurface,
+      style = stableTextStyle,
+    )
+  }
+}
+
+@Composable
+fun MultipleSpeedPlayerUpdate(
+  currentSpeed: Float,
+  modifier: Modifier = Modifier,
+) {
+  TextPlayerUpdate(text = "${currentSpeed.formatSpeed()}x", modifier = modifier)
+}
+
+@Composable
+@Preview
+private fun PreviewMultipleSpeedPlayerUpdate() {
+  MultipleSpeedPlayerUpdate(currentSpeed = 2f)
+}
+
+private fun Float.formatSpeed(): String =
+  if (this % 1.0f == 0.0f) {
+    this.toInt().toString()
+  } else {
+    String.format("%.1f", this)
+  }
+
+@Composable
+fun SeekPlayerUpdate(
+  currentTime: String,
+  seekDelta: String,
+  modifier: Modifier = Modifier,
+) {
+  val stableTextStyle = MaterialTheme.typography.bodyMedium.copy(fontFeatureSettings = tabularFigures)
+  PlayerUpdate(modifier) {
+    Row(
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Text(
+        text = currentTime,
+        fontWeight = FontWeight.Bold,
+        textAlign = TextAlign.Center,
+        color = MaterialTheme.colorScheme.onSurface,
+        style = stableTextStyle,
+      )
+      
+      Text(
+        text = " $seekDelta",
+        fontWeight = FontWeight.Normal,
+        textAlign = TextAlign.Center,
+        style = stableTextStyle,
+        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+      )
+    }
+  }
+}
+
+
+
+

@@ -1,0 +1,4451 @@
+package io.alwayszihan.zeroxpv.ui.player
+
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.BroadcastReceiver
+import android.content.pm.ActivityInfo
+import android.graphics.Bitmap
+import android.media.AudioManager
+import android.net.Uri
+import android.os.BatteryManager
+import android.provider.OpenableColumns
+import android.provider.Settings
+import android.util.DisplayMetrics
+import android.util.Log
+import android.util.LruCache
+import android.view.inputmethod.InputMethodManager
+import android.widget.Toast
+import androidx.core.view.WindowInsetsCompat
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.CreationExtras
+import io.alwayszihan.zeroxpv.R
+import io.alwayszihan.zeroxpv.domain.hdr.HdrToysManager
+import io.alwayszihan.zeroxpv.preferences.AudioPreferences
+import io.alwayszihan.zeroxpv.preferences.GesturePreferences
+import io.alwayszihan.zeroxpv.preferences.IntroSegmentProvider
+import io.alwayszihan.zeroxpv.preferences.PlayerPreferences
+import io.alwayszihan.zeroxpv.preferences.SubtitlesPreferences
+import io.alwayszihan.zeroxpv.repository.IntroDbLookupOutcome
+import io.alwayszihan.zeroxpv.repository.IntroDbLookupRequest
+import io.alwayszihan.zeroxpv.repository.IntroDbRepository
+import io.alwayszihan.zeroxpv.repository.subtitle.OnlineSubtitle
+import io.alwayszihan.zeroxpv.repository.subtitle.OnlineSubtitleOrchestrator
+import io.alwayszihan.zeroxpv.repository.subtitle.OnlineSubtitleSearchRequest
+import io.alwayszihan.zeroxpv.repository.subtitle.OnlineSubtitleSearchMode
+import io.alwayszihan.zeroxpv.repository.wyzie.WyzieSearchRepository
+import io.alwayszihan.zeroxpv.utils.media.ChecksumUtils
+import io.alwayszihan.zeroxpv.utils.media.MediaInfoParser
+import io.alwayszihan.zeroxpv.utils.media.ParsedMediaInfo
+import io.alwayszihan.zeroxpv.utils.media.SubtitleHashUtils
+import io.alwayszihan.zeroxpv.utils.media.resolveSubtitleLookupDirectories
+import `is`.xyz.mpv.MPVLib
+import kotlinx.collections.immutable.persistentListOf
+import kotlinx.collections.immutable.toImmutableList
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import org.koin.core.component.KoinComponent
+import org.koin.core.component.inject
+import io.alwayszihan.zeroxpv.ui.preferences.CustomButton
+import io.alwayszihan.zeroxpv.ui.preferences.CustomButtonScriptLanguage
+import io.alwayszihan.zeroxpv.ui.player.screenshot.ScreenshotSaver
+import io.alwayszihan.zeroxpv.ui.player.screenshot.ScreenshotSettings
+import java.io.File
+import java.security.MessageDigest
+import androidx.core.net.toUri
+import androidx.documentfile.provider.DocumentFile
+import android.webkit.MimeTypeMap
+import io.alwayszihan.zeroxpv.preferences.AdvancedPreferences
+import io.alwayszihan.zeroxpv.preferences.DecoderPreferences
+import io.alwayszihan.zeroxpv.ui.player.ScriptCurlBridge
+import kotlin.properties.ReadOnlyProperty
+import kotlin.reflect.KProperty
+import kotlin.math.roundToInt
+
+
+enum class RepeatMode {
+  OFF,      // No repeat
+  ONE,      // Repeat current file
+  ALL       // Repeat all (playlist)
+}
+
+class PlayerViewModelProviderFactory(
+  private val host: PlayerHost,
+) : ViewModelProvider.Factory {
+  override fun <T : ViewModel> create(
+    modelClass: Class<T>,
+    extras: CreationExtras,
+  ): T {
+    if (modelClass.isAssignableFrom(PlayerViewModel::class.java)) {
+      @Suppress("UNCHECKED_CAST")
+      return PlayerViewModel(host) as T
+    }
+    throw IllegalArgumentException("Unknown ViewModel class")
+  }
+}
+
+@Suppress("TooManyFunctions")
+class PlayerViewModel(
+  private val host: PlayerHost,
+) : ViewModel(),
+  KoinComponent {
+  enum class IntroDbStatusState {
+    IDLE,
+    LOOKING_UP,
+    LOADED,
+    NO_SEGMENTS,
+    UNRESOLVED,
+    ERROR,
+    DISABLED,
+  }
+
+  data class IntroDbStatus(
+    val state: IntroDbStatusState = IntroDbStatusState.IDLE,
+    val message: String = "",
+    val imdbId: String? = null,
+    val segmentCount: Int = 0,
+  )
+
+  @Serializable
+  private data class IntroMarkerCacheEntry(
+    val providerSourceKey: String,
+    val outcomeType: String,
+    val imdbId: String? = null,
+    val message: String = "",
+    val segments: List<io.alwayszihan.zeroxpv.repository.IntroDbSegment> = emptyList(),
+    val cachedAtMs: Long = System.currentTimeMillis(),
+  )
+
+  private val playerPreferences: PlayerPreferences by inject()
+  private val gesturePreferences: GesturePreferences by inject()
+  private val audioPreferences: AudioPreferences by inject()
+  private val subtitlesPreferences: SubtitlesPreferences by inject()
+  private val advancedPreferences: AdvancedPreferences by inject()
+  private val decoderPreferences: DecoderPreferences by inject()
+  private val hdrToysManager: HdrToysManager by inject()
+  private val json: Json by inject()
+  private val playbackStateDao: io.alwayszihan.zeroxpv.database.dao.PlaybackStateDao by inject()
+  private val wyzieRepository: WyzieSearchRepository by inject()
+  private val onlineSubtitleOrchestrator: OnlineSubtitleOrchestrator by inject()
+  private val introDbRepository: IntroDbRepository by inject()
+  private val introMarkerCachePrefs by lazy {
+    host.context.getSharedPreferences(INTRO_MARKER_CACHE_PREFS, Context.MODE_PRIVATE)
+  }
+
+  // HTTP bridge for Lua/JS scripts — executes curl_request payloads via native libcurl
+  private val scriptCurlBridge = ScriptCurlBridge(scope = viewModelScope)
+
+  // Playlist items for the playlist sheet
+  private val _playlistItems = kotlinx.coroutines.flow.MutableStateFlow<List<io.alwayszihan.zeroxpv.ui.player.controls.components.sheets.PlaylistItem>>(emptyList())
+  val playlistItems: kotlinx.coroutines.flow.StateFlow<List<io.alwayszihan.zeroxpv.ui.player.controls.components.sheets.PlaylistItem>> = _playlistItems.asStateFlow()
+
+  private val _onlineSubtitleSearchResults = MutableStateFlow<List<OnlineSubtitle>>(emptyList())
+  val onlineSubtitleSearchResults: StateFlow<List<OnlineSubtitle>> = _onlineSubtitleSearchResults.asStateFlow()
+
+  private val _isDownloadingSub = MutableStateFlow(false)
+  val isDownloadingSub: StateFlow<Boolean> = _isDownloadingSub.asStateFlow()
+
+  private val _isSearchingSub = MutableStateFlow(false)
+  val isSearchingSub: StateFlow<Boolean> = _isSearchingSub.asStateFlow()
+
+  private val _isOnlineSectionExpanded = MutableStateFlow(true)
+  val isOnlineSectionExpanded: StateFlow<Boolean> = _isOnlineSectionExpanded.asStateFlow()
+
+  private var playlistMetadataJob: Job? = null
+  private var controlsVisibleForPolling = false
+  private var seekBarVisibleForPolling = false
+  private val skippedSegmentTypes = mutableSetOf<SkipSegmentType>()
+  private var chapterDerivedSegments: List<SkipSegment> = emptyList()
+  private var introDbSegments: List<io.alwayszihan.zeroxpv.repository.IntroDbSegment> = emptyList()
+  private var introDbSourceKey: String = IntroSegmentProvider.INTRO_DB.sourceKey
+  private var introLookupJob: Job? = null
+  private val introKeywordPatterns =
+    listOf(
+      // English/general
+      "intro",
+      "opening",
+      "opening theme",
+      "theme song",
+      "title song",
+      "creditless opening",
+      "clean opening",
+      "cold open",
+      "prologue",
+      "prelude",
+      "op",
+      "op1",
+      "op2",
+      "op3",
+      "ncop",
+      "ncop1",
+      "ncop2",
+      "nco",
+      // Japanese
+      "オープニング",
+      "オープニングテーマ",
+      "主題歌",
+      "主題歌op",
+      "ノンクレジットop",
+      "ノンテロップop",
+      "ノンクレop",
+      "前期op",
+      "後期op",
+      "冒頭",
+    )
+
+  private val outroKeywordPatterns =
+    listOf(
+      // English/general
+      "outro",
+      "ending",
+      "ending theme",
+      "end credits",
+      "credits",
+      "credit roll",
+      "epilogue",
+      "postlude",
+      "ed",
+      "ed1",
+      "ed2",
+      "ed3",
+      "nced",
+      "nced1",
+      "nced2",
+      "nce",
+      "preview",
+      "next episode",
+      // Japanese
+      "エンディング",
+      "エンディングテーマ",
+      "エンドロール",
+      "次回予告",
+      "ノンクレジットed",
+      "ノンテロップed",
+      "ノンクレed",
+      "前期ed",
+      "後期ed",
+      "予告",
+      "終幕",
+    )
+
+  private val recapKeywordPatterns =
+    listOf(
+      "recap",
+      "summary",
+      "story so far",
+      "previously on",
+      "last time",
+      "digest",
+      "catch up",
+      "振り返り",
+      "前回まで",
+      "これまで",
+      "総集編",
+      "おさらい",
+    )
+
+  private val creditsKeywordPatterns =
+    listOf(
+      "credits",
+      "end credits",
+      "credit roll",
+      "rolling credits",
+      "staff roll",
+      "ã‚¨ãƒ³ãƒ‰ãƒ­ãƒ¼ãƒ«",
+      "ã‚¯ãƒ¬ã‚¸ãƒƒãƒˆ",
+    )
+
+  private val previewKeywordPatterns =
+    listOf(
+      "preview",
+      "next episode",
+      "next week on",
+      "up next",
+      "teaser",
+      "æ¬¡å›žäºˆå‘Š",
+      "äºˆå‘Š",
+      "æ¬¡å›ž",
+    )
+
+  private val _skipSegments = MutableStateFlow<List<SkipSegment>>(emptyList())
+  val skipSegments: StateFlow<List<SkipSegment>> = _skipSegments.asStateFlow()
+  @Volatile private var skipSegmentsSnapshot: List<SkipSegment> = emptyList()
+
+  private val _currentSkippableSegment = MutableStateFlow<SkipSegment?>(null)
+  val currentSkippableSegment: StateFlow<SkipSegment?> = _currentSkippableSegment.asStateFlow()
+  private val _showSkipChipAuto = MutableStateFlow(false)
+  val showSkipChipAuto: StateFlow<Boolean> = _showSkipChipAuto.asStateFlow()
+  private var pendingIntroLookupTitle: String? = null
+
+  private val _introDbStatus = MutableStateFlow(
+    if (playerPreferences.enableIntroDb.get()) {
+      IntroDbStatus()
+    } else {
+      IntroDbStatus(
+        state = IntroDbStatusState.DISABLED,
+        message = "Online skip markers are disabled",
+      )
+    },
+  )
+  val introDbStatus: StateFlow<IntroDbStatus> = _introDbStatus.asStateFlow()
+
+  // Media Search / Autocomplete
+  private val _mediaSearchResults = MutableStateFlow<List<io.alwayszihan.zeroxpv.repository.wyzie.WyzieTmdbResult>>(emptyList())
+  val mediaSearchResults: StateFlow<List<io.alwayszihan.zeroxpv.repository.wyzie.WyzieTmdbResult>> = _mediaSearchResults.asStateFlow()
+
+  private val _isSearchingMedia = MutableStateFlow(false)
+  val isSearchingMedia: StateFlow<Boolean> = _isSearchingMedia.asStateFlow()
+
+  // TV Show Details
+  private val _selectedTvShow = MutableStateFlow<io.alwayszihan.zeroxpv.repository.wyzie.WyzieTvShowDetails?>(null)
+  val selectedTvShow: StateFlow<io.alwayszihan.zeroxpv.repository.wyzie.WyzieTvShowDetails?> = _selectedTvShow.asStateFlow()
+
+  private val _isFetchingTvDetails = MutableStateFlow(false)
+  val isFetchingTvDetails: StateFlow<Boolean> = _isFetchingTvDetails.asStateFlow()
+
+  // Season / Episode
+  private val _selectedSeason = MutableStateFlow<io.alwayszihan.zeroxpv.repository.wyzie.WyzieSeason?>(null)
+  val selectedSeason: StateFlow<io.alwayszihan.zeroxpv.repository.wyzie.WyzieSeason?> = _selectedSeason.asStateFlow()
+
+  private val _seasonEpisodes = MutableStateFlow<List<io.alwayszihan.zeroxpv.repository.wyzie.WyzieEpisode>>(emptyList())
+  val seasonEpisodes: StateFlow<List<io.alwayszihan.zeroxpv.repository.wyzie.WyzieEpisode>> = _seasonEpisodes.asStateFlow()
+
+  private val _isFetchingEpisodes = MutableStateFlow(false)
+  val isFetchingEpisodes: StateFlow<Boolean> = _isFetchingEpisodes.asStateFlow()
+
+  private val _selectedEpisode = MutableStateFlow<io.alwayszihan.zeroxpv.repository.wyzie.WyzieEpisode?>(null)
+  val selectedEpisode: StateFlow<io.alwayszihan.zeroxpv.repository.wyzie.WyzieEpisode?> = _selectedEpisode.asStateFlow()
+
+  fun toggleOnlineSection() {
+      _isOnlineSectionExpanded.value = !_isOnlineSectionExpanded.value
+  }
+
+  // Cache for video metadata to avoid re-extracting — LruCache handles bounds + thread-safety
+  private val metadataCache = object : android.util.LruCache<String, Pair<String, String>>(100) {}
+  private val playbackStateDispatcher = Dispatchers.Default.limitedParallelism(1)
+  private val renderPrepDispatcher = Dispatchers.Default.limitedParallelism(1)
+  private val seekThumbnailDispatcher = Dispatchers.Default.limitedParallelism(1)
+  private val ambientCropRegex = Regex("""^(\d+)x(\d+)""")
+  private val seekThumbnailCache =
+    object : LruCache<String, Bitmap>(SEEK_THUMBNAIL_CACHE_KB) {
+      override fun sizeOf(key: String, value: Bitmap): Int = (value.allocationByteCount / 1024).coerceAtLeast(1)
+    }
+
+  private fun updateMetadataCache(key: String, value: Pair<String, String>) {
+    metadataCache.put(key, value)
+  }
+
+  // MPV-backed scalar state. Keep these initialized before any coroutine can read them.
+  private val _paused = MutableStateFlow<Boolean?>(null)
+  val paused: Boolean? get() = _paused.value
+
+  private val _pos = MutableStateFlow<Int?>(null)
+  val pos: Int? get() = _pos.value
+
+  private val _duration = MutableStateFlow<Int?>(null)
+  val duration: Int? get() = _duration.value
+
+  private val _volumeBoostCap = MutableStateFlow<Int?>(null)
+  private val volumeBoostCap: Int? get() = _volumeBoostCap.value
+
+  private val _isMpvCoreReady = MutableStateFlow(false)
+  private var mpvStateCollectorsJob: Job? = null
+
+  // High-precision position and duration for smooth seekbar
+  private val _precisePosition = MutableStateFlow(0f)
+  val precisePosition = _precisePosition.asStateFlow()
+
+  private val _preciseDuration = MutableStateFlow(0f)
+  val preciseDuration = _preciseDuration.asStateFlow()
+
+  // These MPV-backed state flows must be initialized before any init block collects them.
+  val subtitleTracks: StateFlow<List<TrackNode>> =
+    MPVLib.propNode["track-list"]
+      .map { node ->
+        node?.toObject<List<TrackNode>>(json)?.filter { it.isSubtitle }?.toImmutableList()
+          ?: persistentListOf()
+      }.stateIn(viewModelScope, SharingStarted.Lazily, persistentListOf())
+
+  val audioTracks: StateFlow<List<TrackNode>> =
+    MPVLib.propNode["track-list"]
+      .map { node ->
+        node?.toObject<List<TrackNode>>(json)?.filter { it.isAudio }?.toImmutableList()
+          ?: persistentListOf()
+      }.stateIn(viewModelScope, SharingStarted.Lazily, persistentListOf())
+
+  val isAudioOnly: StateFlow<Boolean> =
+    MPVLib.propNode["track-list"]
+      .map { node ->
+        val tracks = node?.toObject<List<TrackNode>>(json).orEmpty()
+        tracks.any { it.isAudio } && tracks.none { it.isVideo && !it.isAlbumArtwork }
+      }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+  val hasAlbumArt: StateFlow<Boolean> =
+    MPVLib.propNode["track-list"]
+      .map { node ->
+        val tracks = node?.toObject<List<TrackNode>>(json).orEmpty()
+        tracks.any { it.isAlbumArtwork }
+      }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+  val chapters: StateFlow<List<dev.vivvvek.seeker.Segment>> =
+    MPVLib.propNode["chapter-list"]
+      .map { node ->
+        node?.toObject<List<ChapterNode>>(json)?.map { it.toSegment() }?.toImmutableList()
+          ?: persistentListOf()
+      }.stateIn(viewModelScope, SharingStarted.Lazily, persistentListOf())
+
+  // Audio state
+  val maxVolume = host.audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+  val currentVolume = MutableStateFlow(host.audioManager.getStreamVolume(AudioManager.STREAM_MUSIC))
+  val currentVolumePercent = MutableStateFlow(systemVolumeToPercent(currentVolume.value))
+  // UI state
+  private val _controlsShown = MutableStateFlow(false)
+  val controlsShown: StateFlow<Boolean> = _controlsShown.asStateFlow()
+
+  private val _seekBarShown = MutableStateFlow(false)
+  val seekBarShown: StateFlow<Boolean> = _seekBarShown.asStateFlow()
+
+  private val _areControlsLocked = MutableStateFlow(false)
+  val areControlsLocked: StateFlow<Boolean> = _areControlsLocked.asStateFlow()
+
+  val playerUpdate = MutableStateFlow<PlayerUpdates>(PlayerUpdates.None)
+  val isBrightnessSliderShown = MutableStateFlow(false)
+  val isVolumeSliderShown = MutableStateFlow(false)
+  val volumeSliderTimestamp = MutableStateFlow(0L)
+  val brightnessSliderTimestamp = MutableStateFlow(0L)
+  val currentBrightness =
+    MutableStateFlow(
+      runCatching {
+        Settings.System
+          .getFloat(host.hostContentResolver, Settings.System.SCREEN_BRIGHTNESS)
+          .normalize(0f, 255f, 0f, 1f)
+      }.getOrElse { 0f },
+    )
+
+  val sheetShown = MutableStateFlow(Sheets.None)
+  val isPlaylistSwipeActive = MutableStateFlow(false)
+  val playlistSwipeOffset = MutableStateFlow(0f)
+  val panelShown = MutableStateFlow(Panels.None)
+  private val _videoOpenAnimationState = MutableStateFlow(VideoOpenAnimationState())
+  val videoOpenAnimationState: StateFlow<VideoOpenAnimationState> = _videoOpenAnimationState.asStateFlow()
+
+  // Seek state — combined to allow atomic updates and reduce flow count
+  data class SeekState(val text: String? = null, val amount: Int = 0, val isForwards: Boolean = false)
+  private val _seekState = MutableStateFlow(SeekState())
+  val seekState: StateFlow<SeekState> = _seekState.asStateFlow()
+
+  data class SeekThumbnailPreview(
+    val visible: Boolean = false,
+    val positionSeconds: Float = 0f,
+    val fraction: Float = 0f,
+    val bitmap: Bitmap? = null,
+    val isLoading: Boolean = false,
+  )
+  private val _seekThumbnailPreview = MutableStateFlow(SeekThumbnailPreview())
+  val seekThumbnailPreview: StateFlow<SeekThumbnailPreview> = _seekThumbnailPreview.asStateFlow()
+  private data class SeekThumbnailRequest(
+    val source: String,
+    val positionSeconds: Float,
+    val durationSeconds: Float,
+    val bucket: Int,
+    val requestId: Long,
+  )
+  private val seekThumbnailRequestLock = Any()
+  private var pendingSeekThumbnailRequest: SeekThumbnailRequest? = null
+  private var seekThumbnailWorkerJob: Job? = null
+  private var seekThumbnailRequestId = 0L
+  private var lastQueuedSeekThumbnailKey: String? = null
+
+  // Frame navigation
+  private val _currentFrame = MutableStateFlow(0)
+  val currentFrame: StateFlow<Int> = _currentFrame.asStateFlow()
+
+  private val _totalFrames = MutableStateFlow(0)
+  val totalFrames: StateFlow<Int> = _totalFrames.asStateFlow()
+
+  private val _isFrameNavigationExpanded = MutableStateFlow(false)
+  val isFrameNavigationExpanded: StateFlow<Boolean> = _isFrameNavigationExpanded.asStateFlow()
+
+  private val _isSnapshotLoading = MutableStateFlow(false)
+  val isSnapshotLoading: StateFlow<Boolean> = _isSnapshotLoading.asStateFlow()
+
+  // Video zoom
+  private val _videoZoom = MutableStateFlow(0f)
+  val videoZoom: StateFlow<Float> = _videoZoom.asStateFlow()
+
+  // Video aspect ratio (persisted in player preferences)
+  private val _videoAspect = MutableStateFlow(VideoAspect.Fit)
+  val videoAspect: StateFlow<VideoAspect> = _videoAspect.asStateFlow()
+
+  // Current aspect ratio value (for custom ratios and tracking)
+  private val _currentAspectRatio = MutableStateFlow(-1.0)
+  val currentAspectRatio: StateFlow<Double> = _currentAspectRatio.asStateFlow()
+
+  // Timer
+  private var timerJob: Job? = null
+  private val _remainingTime = MutableStateFlow(0)
+  val remainingTime: StateFlow<Int> = _remainingTime.asStateFlow()
+
+  // Media title for subtitle association
+  var currentMediaTitle: String = ""
+  private var lastAutoSelectedMediaTitle: String? = null
+  private val _videoHash = MutableStateFlow<String?>(null)
+  val videoHash: StateFlow<String?> = _videoHash.asStateFlow()
+  private var videoHashJob: Job? = null
+  @Volatile
+  private var videoHashGeneration = 0
+
+  // External subtitle tracking
+  private val _externalSubtitles = mutableListOf<String>()
+  val externalSubtitles: List<String> get() = _externalSubtitles.toList()
+  // Mutex to prevent race-condition duplicates when scan adds multiple subtitle URIs concurrently
+  private val subtitleAddMutex = Mutex()
+
+  // Mapping from mpv internal path/URI to the original source URI (resolves deletion issues)
+  private val mpvPathToUriMap = mutableMapOf<String, String>()
+
+  fun calculateVideoHash(uri: Uri) {
+    _videoHash.value = null
+    val generation = ++videoHashGeneration
+    videoHashJob?.cancel()
+    videoHashJob = viewModelScope.launch(Dispatchers.IO) {
+      val hash = SubtitleHashUtils.computeHash(host.context, uri)
+      if (videoHashGeneration == generation) {
+        _videoHash.value = hash
+      }
+      Log.d(TAG, "Computed video hash for $uri: ${hash ?: "unavailable"}")
+    }
+  }
+
+  // Repeat and Shuffle state
+  private val _repeatMode = MutableStateFlow(RepeatMode.OFF)
+  val repeatMode: StateFlow<RepeatMode> = _repeatMode.asStateFlow()
+
+  private val _shuffleEnabled = MutableStateFlow(false)
+  val shuffleEnabled: StateFlow<Boolean> = _shuffleEnabled.asStateFlow()
+
+  // A-B Loop state — combined for atomic updates
+  data class ABLoopState(val a: Double? = null, val b: Double? = null, val isExpanded: Boolean = false)
+  private val _abLoopState = MutableStateFlow(ABLoopState())
+  val abLoopState: StateFlow<ABLoopState> = _abLoopState.asStateFlow()
+
+  // Transform state (mirror + flip) — combined, saves 1 StateFlow object
+  data class TransformState(val isMirrored: Boolean = false, val isVerticalFlipped: Boolean = false)
+  private val _transformState = MutableStateFlow(TransformState())
+  val transformState: StateFlow<TransformState> = _transformState.asStateFlow()
+
+  private val _hdrScreenMode = MutableStateFlow(initialHdrScreenMode())
+  val hdrScreenMode: StateFlow<HdrScreenMode> = _hdrScreenMode.asStateFlow()
+
+  private val _isHdrScreenOutputPipelineReady = MutableStateFlow(isHdrScreenOutputAvailable())
+  val isHdrScreenOutputPipelineReady: StateFlow<Boolean> = _isHdrScreenOutputPipelineReady.asStateFlow()
+
+  private val _isHdrScreenOutputEnabled =
+    MutableStateFlow(_isHdrScreenOutputPipelineReady.value && _hdrScreenMode.value != HdrScreenMode.OFF)
+  val isHdrScreenOutputEnabled: StateFlow<Boolean> = _isHdrScreenOutputEnabled.asStateFlow()
+
+  // ==================== Ambience Mode ======================================
+  private val _isAmbientEnabled = MutableStateFlow(playerPreferences.isAmbientEnabled.get())
+  val isAmbientEnabled: StateFlow<Boolean> = _isAmbientEnabled.asStateFlow()
+
+  private val _ambientVisualMode = MutableStateFlow(playerPreferences.ambientVisualMode.get())
+  val ambientVisualMode: StateFlow<AmbientVisualMode> = _ambientVisualMode.asStateFlow()
+
+  private val _ambientBlurSamples = MutableStateFlow(playerPreferences.ambientBlurSamples.get())
+  val ambientBlurSamples: StateFlow<Int> = _ambientBlurSamples.asStateFlow()
+
+  private val _ambientMaxRadius = MutableStateFlow(playerPreferences.ambientMaxRadius.get())
+  val ambientMaxRadius: StateFlow<Float> = _ambientMaxRadius.asStateFlow()
+
+  private val _ambientGlowIntensity = MutableStateFlow(playerPreferences.ambientGlowIntensity.get())
+  val ambientGlowIntensity: StateFlow<Float> = _ambientGlowIntensity.asStateFlow()
+
+  private val _ambientSatBoost = MutableStateFlow(playerPreferences.ambientSatBoost.get())
+  val ambientSatBoost: StateFlow<Float> = _ambientSatBoost.asStateFlow()
+
+  private val _ambientDitherNoise = MutableStateFlow(playerPreferences.ambientDitherNoise.get())
+  val ambientDitherNoise: StateFlow<Float> = _ambientDitherNoise.asStateFlow()
+
+  private val _ambientBezelDepth = MutableStateFlow(playerPreferences.ambientBezelDepth.get())
+  val ambientBezelDepth: StateFlow<Float> = _ambientBezelDepth.asStateFlow()
+
+  private val _ambientVignetteStrength = MutableStateFlow(playerPreferences.ambientVignetteStrength.get())
+  val ambientVignetteStrength: StateFlow<Float> = _ambientVignetteStrength.asStateFlow()
+
+  private val _ambientWarmth = MutableStateFlow(playerPreferences.ambientWarmth.get())
+  val ambientWarmth: StateFlow<Float> = _ambientWarmth.asStateFlow()
+
+  private val _ambientFadeCurve = MutableStateFlow(playerPreferences.ambientFadeCurve.get())
+  val ambientFadeCurve: StateFlow<Float> = _ambientFadeCurve.asStateFlow()
+
+  private val _ambientOpacity = MutableStateFlow(playerPreferences.ambientOpacity.get())
+  val ambientOpacity: StateFlow<Float> = _ambientOpacity.asStateFlow()
+
+  private val _frameExtendStrength = MutableStateFlow(playerPreferences.ambientExtendStrength.get())
+  val frameExtendStrength: StateFlow<Float> = _frameExtendStrength.asStateFlow()
+
+  private val _frameExtendDetailProtection = MutableStateFlow(playerPreferences.ambientExtendDetailProtection.get())
+  val frameExtendDetailProtection: StateFlow<Float> = _frameExtendDetailProtection.asStateFlow()
+
+  private val _frameExtendGlowMix = MutableStateFlow(playerPreferences.ambientExtendGlowMix.get())
+  val frameExtendGlowMix: StateFlow<Float> = _frameExtendGlowMix.asStateFlow()
+
+  private var lastAmbientScaleX = -1.0
+  private var lastAmbientScaleY = -1.0
+  private var ambientDebounceJob: kotlinx.coroutines.Job? = null
+  private var ambientShaderSeq = 0
+  private var ambientShaderFile: java.io.File? = null
+  /**
+   * True while the ambient shader is detached from mpv's shader list but the generated
+   * source is unchanged. Used to re-attach the same source instead of forcing a recompile.
+   */
+  private var ambientShaderDetachedForReload = false
+  /**
+   * Caches the last compiled GLSL shader source. When [updateAmbientStretch] is called
+   * but every parameter is identical to the previously compiled shader, the expensive
+   * file-write + MPV shader-reload cycle is skipped entirely.
+   */
+  private var lastCompiledShaderCode: String? = null
+  /**
+   * Latest device thermal headroom reading ([0f] = at thermal limit, [1f] = cool).
+   * Sampled every 10 s by the thermal-monitor coroutine and used to cap the ambient
+   * shader sample budget before the SoC enters hard throttling.
+   */
+  @Volatile private var thermalHeadroom: Float = 1.0f
+
+  private val _isAmbientBatterySaver = MutableStateFlow(playerPreferences.ambientBatterySaver.get())
+  val isAmbientBatterySaver: StateFlow<Boolean> = _isAmbientBatterySaver.asStateFlow()
+  private var ambientWasOnBattery = false
+  private var ambientPreBatterySaverSamples: Int = 18
+  private var ambientPreBatterySaverRadius: Float = 0.18f
+  private var ambientPreBatterySaverIntensity: Float = 1.4f
+  private var ambientPreBatterySaverSatBoost: Float = 1.2f
+  private var ambientPreBatterySaverVignette: Float = 0.5f
+  private var ambientPreBatterySaverWarmth: Float = 0.0f
+  private var ambientPreBatterySaverFadeCurve: Float = 1.5f
+  private var ambientPreBatterySaverOpacity: Float = 1.0f
+  private var batteryReceiver: BroadcastReceiver? = null
+  private var androidSystemInfoBridgeJob: Job? = null
+
+  // ==================== Custom Buttons ====================
+
+  data class CustomButtonState(
+    val id: String,
+    val label: String,
+    val isLeft: Boolean,
+  )
+
+  private val _customButtons = MutableStateFlow<List<CustomButtonState>>(emptyList())
+  val customButtons: StateFlow<List<CustomButtonState>> = _customButtons.asStateFlow()
+  private var customButtonsSetupJob: Job? = null
+  private val customButtonsLoadMutex = Mutex()
+  @Volatile
+  private var isMpvReadyForCustomButtons = false
+  @Volatile
+  private var customButtonsScriptPaths: Map<CustomButtonScriptLanguage, String> = emptyMap()
+  private val legacyCustomButtonsLoadedFlagProperty = "user-data/zeroxpv/custombuttons_loaded"
+  private val legacyCustomButtonsVersionProperty = "user-data/zeroxpv/custombuttons_version"
+  private val customButtonScriptTargets =
+    listOf(
+      CustomButtonScriptTarget(
+        language = CustomButtonScriptLanguage.LUA,
+        fileName = "custombuttons.lua",
+        loadedFlagProperty = "user-data/zeroxpv/custombuttons_lua_loaded",
+        versionProperty = "user-data/zeroxpv/custombuttons_lua_version",
+      ),
+      CustomButtonScriptTarget(
+        language = CustomButtonScriptLanguage.JS,
+        fileName = "custombuttons.js",
+        loadedFlagProperty = "user-data/zeroxpv/custombuttons_js_loaded",
+        versionProperty = "user-data/zeroxpv/custombuttons_js_version",
+      ),
+    )
+  private val customButtonScriptTargetsByLanguage =
+    customButtonScriptTargets.associateBy { it.language }
+
+  private data class CustomButtonScriptTarget(
+    val language: CustomButtonScriptLanguage,
+    val fileName: String,
+    val loadedFlagProperty: String,
+    val versionProperty: String,
+  )
+
+  init {
+    // Single adaptive polling loop for playback position.
+    //  1. An event-driven collect on MPVLib.propInt["time-pos"]
+    //  2. This polling loop via MPVLib.getPropertyDouble("time-pos")
+    // Having both caused redundant StateFlow emissions and double recompositions of the
+    // seek bar on every MPV property event.  The polling loop alone is sufficient:
+    //  - It provides Double precision (vs integer from the observer)
+    //  - It drives maybeAutoSkipIntro() which needs sub-second accuracy
+    //  - The adaptive interval keeps CPU cost proportional to actual UI demand
+    //
+    // Intervals:
+    //   50 ms  – seek bar / controls visible (smooth scrubbing)
+    //   500 ms – uninterrupted playback (halved from original 250 ms to cut idle overhead)
+    //   500 ms – paused
+    viewModelScope.launch(playbackStateDispatcher) {
+      while (isActive) {
+        if (!_isMpvCoreReady.value) {
+          delay(250L)
+          continue
+        }
+        runCatching {
+          val time = MPVLib.getPropertyDouble("time-pos")
+          if (time != null) {
+            _precisePosition.value = time.toFloat()
+            maybeAutoSkipIntro(time)
+          }
+        }.onFailure { error ->
+          if (isActive) {
+            Log.w(TAG, "Playback position polling failed", error)
+          }
+        }
+        val intervalMs =
+          when {
+            paused == false && (seekBarVisibleForPolling || controlsVisibleForPolling) -> 50L
+            paused == false -> 500L   // was 250 ms — halved to reduce idle CPU wake-ups
+            else -> 500L
+          }
+        delay(intervalMs)
+      }
+    }
+
+    // ── Thermal monitor ────────────────────────────────────────────────────────
+    // Sample Android's PowerManager.getThermalHeadroom() every 10 s during active
+    // playback.  When thermal margin shrinks the ambient shader sample budget is
+    // capped automatically, preventing the device from entering hard CPU/GPU throttling
+    // which would otherwise manifest as dropped frames and accelerated battery drain.
+    viewModelScope.launch(playbackStateDispatcher) {
+      while (isActive) {
+        if (_isMpvCoreReady.value && paused == false) {
+          val newHeadroom = ThermalMonitor.getHeadroom(host.context)
+          if (kotlin.math.abs(newHeadroom - thermalHeadroom) > 0.08f) {
+            thermalHeadroom = newHeadroom
+            if (_isAmbientEnabled.value) {
+              // Invalidate the shader cache so the new budget cap is applied on the
+              // next scheduled ambient update.
+              lastCompiledShaderCode = null
+              scheduleAmbientUpdate()
+            }
+            Log.d(TAG, "Thermal headroom updated: %.2f".format(newHeadroom))
+          }
+        }
+        delay(10_000L)
+      }
+    }
+
+    // Update precise duration when the integer duration changes (avoid polling)
+    viewModelScope.launch(playbackStateDispatcher) {
+      _duration.collect { _ ->
+        if (!_isMpvCoreReady.value) return@collect
+        val dur = MPVLib.getPropertyDouble("duration")
+        if (dur != null && dur > 0) {
+            _preciseDuration.value = dur.toFloat()
+            mergeSkipSegments()
+            checkPendingIntroLookup()
+
+            // --- AMBIENT FIX: Adapt shader to new file dimensions by @Chinna95P ---
+            if (_isAmbientEnabled.value) {
+                lastAmbientScaleX = -1.0 // Force a complete shader rewrite
+                ambientDebounceJob?.cancel()
+                ambientDebounceJob = viewModelScope.launch(renderPrepDispatcher) {
+                    // Slight delay ensures MPV's video-params (w/h/crop) are fully populated
+                    delay(250)
+                    updateAmbientStretch()
+                }
+            }
+            // --------------------------------------------------------
+        }
+      }
+    }
+
+    viewModelScope.launch(playbackStateDispatcher) {
+      chapters
+        .collect { chapterList ->
+          refreshChapterDerivedSegments(chapterList)
+      }
+    }
+
+    viewModelScope.launch(playbackStateDispatcher) {
+      combine(
+        playerPreferences.customIntroKeywordsEnabled.changes(),
+        playerPreferences.customIntroKeywords.changes(),
+        playerPreferences.customOutroKeywordsEnabled.changes(),
+        playerPreferences.customOutroKeywords.changes()
+      ) { _, _, _, _ -> }.collect {
+        refreshChapterDerivedSegments(chapters.value)
+      }
+    }
+
+    // Track selection is now handled by TrackSelector in PlayerActivity
+
+    // Restore repeat mode and shuffle state from preferences
+    _repeatMode.value = playerPreferences.repeatMode.get()
+    _shuffleEnabled.value = playerPreferences.shuffleEnabled.get()
+
+    // Observe volume boost cap changes to enforce limits dynamically (in PiP)
+    viewModelScope.launch(playbackStateDispatcher) {
+      audioPreferences.volumeBoostCap.changes().collect { cap ->
+        val maxVol = 100 + cap
+        runCatching {
+          MPVLib.setPropertyString("volume-max", maxVol.toString())
+
+          // Clamp current volume if it exceeds the new limit
+          val currentMpvVol = MPVLib.getPropertyInt("volume") ?: 100
+          if (currentMpvVol > maxVol) {
+            MPVLib.setPropertyInt("volume", maxVol)
+          }
+        }.onFailure { e ->
+          Log.e(TAG, "Error setting volume-max: $maxVol", e)
+        }
+      }
+    }
+
+    // Monitor duration and AB loop changes to automatically enable precise seeking
+    viewModelScope.launch(playbackStateDispatcher) {
+      combine(_duration, abLoopState) { duration, abLoop ->
+        Pair(duration, abLoop)
+      }.collect { (duration, abLoop) ->
+        if (!_isMpvCoreReady.value) return@collect
+        val videoDuration = duration ?: 0
+        val isLoopActive = abLoop.a != null || abLoop.b != null
+        val shouldUsePreciseSeeking = playerPreferences.usePreciseSeeking.get() || videoDuration < 120 || isLoopActive
+        MPVLib.setPropertyString("hr-seek", if (shouldUsePreciseSeeking) "yes" else "no")
+        MPVLib.setPropertyString("hr-seek-framedrop", if (shouldUsePreciseSeeking) "no" else "yes")
+      }
+    }
+
+
+    // Refresh custom buttons whenever their configuration changes.
+    viewModelScope.launch {
+      playerPreferences.customButtons.changes().drop(1).collect {
+        setupCustomButtons()
+      }
+    }
+
+    // Observe ambient battery saver preference
+    viewModelScope.launch {
+      playerPreferences.ambientBatterySaver.changes().collect { enabled ->
+        _isAmbientBatterySaver.value = enabled
+        if (enabled && _isAmbientEnabled.value) {
+          applyBatterySaverPolicy()
+        } else if (!enabled && ambientWasOnBattery && _isAmbientEnabled.value) {
+          restoreFromBatterySaver()
+        }
+      }
+    }
+
+    viewModelScope.launch {
+      sheetShown.collect { shownSheet ->
+        if (shownSheet == Sheets.Playlist) {
+          refreshPlaylistItems(forceMetadata = true)
+        } else {
+          playlistMetadataJob?.cancel()
+        }
+      }
+    }
+
+    setupCustomButtons()
+  }
+
+  fun onMpvCoreInitialized() {
+    _isMpvCoreReady.value = true
+    startMpvStateCollectors()
+    isMpvReadyForCustomButtons = true
+    reloadCustomButtonsScript("mpv_core_initialized")
+    startAndroidSystemInfoBridge()
+  }
+
+  private fun startMpvStateCollectors() {
+    if (mpvStateCollectorsJob?.isActive == true) return
+    mpvStateCollectorsJob =
+      viewModelScope.launch(playbackStateDispatcher) {
+        launch { MPVLib.propBoolean["pause"].collect { _paused.value = it } }
+        launch { MPVLib.propInt["time-pos"].collect { _pos.value = it } }
+        launch { MPVLib.propInt["duration"].collect { _duration.value = it } }
+        launch { MPVLib.propInt["volume-max"].collect { _volumeBoostCap.value = it } }
+      }
+  }
+
+  private fun startAndroidSystemInfoBridge() {
+    if (androidSystemInfoBridgeJob?.isActive == true) return
+
+    val appContext = host.context.applicationContext
+    androidSystemInfoBridgeJob = viewModelScope.launch(playbackStateDispatcher) {
+      while (isActive) {
+        publishAndroidBatteryState(appContext)
+        delay(30_000L)
+      }
+    }
+  }
+
+  private fun publishAndroidBatteryState(context: Context) {
+    runCatching {
+      val state = readAndroidBatteryState(context)
+      MPVLib.setPropertyInt("user-data/android/battery-level", state.level)
+      MPVLib.setPropertyBoolean("user-data/android/battery-charging", state.charging)
+      MPVLib.setPropertyBoolean("user-data/android/battery-plugged", state.plugged)
+      onBatteryStateChanged(state.charging)
+    }.onFailure { error ->
+      Log.w(TAG, "Failed to publish Android battery properties", error)
+    }
+  }
+
+  private data class AndroidBatteryState(
+    val level: Int,
+    val charging: Boolean,
+    val plugged: Boolean,
+  )
+
+  private fun readAndroidBatteryState(context: Context): AndroidBatteryState {
+    val batteryManager = context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+    val batteryIntent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+    val intentLevel = batteryIntent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+    val scale = batteryIntent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+    val propertyLevel = batteryManager
+      ?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+      ?.takeIf { it in 0..100 }
+    val fallbackLevel =
+      if (intentLevel >= 0 && scale > 0) {
+        ((intentLevel * 100f) / scale).roundToInt().coerceIn(0, 100)
+      } else {
+        -1
+      }
+    val status = batteryIntent?.getIntExtra(BatteryManager.EXTRA_STATUS, BatteryManager.BATTERY_STATUS_UNKNOWN)
+      ?: BatteryManager.BATTERY_STATUS_UNKNOWN
+    val pluggedExtra = batteryIntent?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0
+    val charging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
+    return AndroidBatteryState(
+      level = propertyLevel ?: fallbackLevel,
+      charging = charging,
+      plugged = pluggedExtra != 0,
+    )
+  }
+
+  fun onVideoLoadStarted() {
+    hideSeekThumbnailPreview()
+    seekThumbnailCache.evictAll()
+    _videoOpenAnimationState.update {
+      it.copy(
+        loadToken = it.loadToken + 1,
+        isWaitingForVideo = true,
+      )
+    }
+  }
+
+  fun onVideoLoadCompleted() {
+    _videoOpenAnimationState.update { current ->
+      if (current.isWaitingForVideo) {
+        current.copy(isWaitingForVideo = false)
+      } else {
+        current
+      }
+    }
+  }
+
+  private fun setupCustomButtons() {
+    customButtonsSetupJob?.cancel()
+    customButtonsSetupJob = viewModelScope.launch(Dispatchers.IO) {
+      try {
+        val buttons = mutableListOf<CustomButtonState>()
+        val scriptBodies = linkedMapOf<CustomButtonScriptLanguage, StringBuilder>()
+        val jsonString = playerPreferences.customButtons.get()
+        if (jsonString.isNotBlank()) {
+          try {
+            // Try new slot-based format first
+            val slotsData = json.decodeFromString<io.alwayszihan.zeroxpv.ui.preferences.CustomButtonSlots>(jsonString)
+            slotsData.slots.forEachIndexed { index, btn ->
+              if (btn != null && btn.enabled) {
+                val safeId = btn.id.replace("-", "_")
+                val isLeft = index < 4 // Slots 0-3 are left, 4-7 are right
+                processButton(
+                  originalId = btn.id,
+                  safeId = safeId,
+                  label = btn.title,
+                  command = btn.content,
+                  longPressCommand = btn.longPressContent,
+                  onStartup = btn.onStartup,
+                  language = btn.scriptLanguage,
+                  scriptBuilder = scriptBodies.getOrPut(btn.scriptLanguage) { StringBuilder() },
+                  isLeft = isLeft,
+                  uiList = buttons,
+                )
+              }
+            }
+          } catch (e: Exception) {
+            // Fallback to old format for backward compatibility
+            try {
+              val customButtonsList = json.decodeFromString<List<io.alwayszihan.zeroxpv.ui.preferences.CustomButton>>(jsonString)
+              customButtonsList.forEachIndexed { index, btn ->
+                val safeId = btn.id.replace("-", "_")
+                val isLeft = index < 4 // First 4 are left buttons, rest are right
+                processButton(
+                  originalId = btn.id,
+                  safeId = safeId,
+                  label = btn.title,
+                  command = btn.content,
+                  longPressCommand = btn.longPressContent,
+                  onStartup = btn.onStartup,
+                  language = btn.scriptLanguage,
+                  scriptBuilder = scriptBodies.getOrPut(btn.scriptLanguage) { StringBuilder() },
+                  isLeft = isLeft,
+                  uiList = buttons,
+                )
+              }
+            } catch (e2: Exception) {
+              e2.printStackTrace()
+            }
+          }
+        }
+
+        _customButtons.value = buttons
+
+        val generatedPaths = mutableMapOf<CustomButtonScriptLanguage, String>()
+        val scriptsDir = File(host.context.filesDir, "scripts")
+        if (!scriptsDir.exists()) scriptsDir.mkdirs()
+
+        scriptBodies.forEach { (language, bodyBuilder) ->
+          val rawScriptContent = bodyBuilder.toString()
+          if (rawScriptContent.isBlank()) return@forEach
+
+          val target = customButtonScriptTargetsByLanguage[language] ?: return@forEach
+          val scriptVersion = rawScriptContent.md5()
+          val scriptContent = buildCustomButtonsScript(rawScriptContent, scriptVersion, target)
+
+          val file = File(scriptsDir, target.fileName)
+          file.writeText(scriptContent)
+          generatedPaths[language] = file.absolutePath
+        }
+
+        customButtonsScriptPaths = generatedPaths.toMap()
+        deleteCustomButtonsScriptFiles(activePaths = generatedPaths.values.toSet())
+        withContext(Dispatchers.Main) {
+          customButtonScriptTargets
+            .filter { it.language !in generatedPaths.keys }
+            .forEach(::deactivateCustomButtonsScript)
+        }
+
+        if (generatedPaths.isNotEmpty()) {
+          if (isMpvReadyForCustomButtons) {
+            customButtonsLoadMutex.withLock {
+              withContext(Dispatchers.Main) {
+                deactivateLegacyCustomButtonsScript()
+              }
+              generatedPaths.forEach { (language, path) ->
+                val target = customButtonScriptTargetsByLanguage[language] ?: return@forEach
+                val loaded = withContext(Dispatchers.Main) {
+                  loadCustomButtonsScript(File(path), target)
+                }
+                if (!loaded) {
+                  android.util.Log.w("PlayerViewModel", "Failed to load ${target.fileName}")
+                }
+              }
+            }
+          } else {
+            android.util.Log.d("PlayerViewModel", "Deferring custom button scripts until MPV is ready")
+          }
+        } else {
+          customButtonsScriptPaths = emptyMap()
+          deleteCustomButtonsScriptFiles()
+          withContext(Dispatchers.Main) {
+            customButtonScriptTargets.forEach(::deactivateCustomButtonsScript)
+            deactivateLegacyCustomButtonsScript()
+          }
+        }
+      } catch (e: Exception) {
+        android.util.Log.e("PlayerViewModel", "Error setting up custom buttons", e)
+      }
+    }
+  }
+
+  private fun reloadCustomButtonsScript(reason: String) {
+    if (!isMpvReadyForCustomButtons) return
+
+    viewModelScope.launch(Dispatchers.IO) {
+      var rebuildNeeded = false
+      customButtonsLoadMutex.withLock {
+        val scriptPaths = customButtonsScriptPaths
+        if (scriptPaths.isEmpty()) return@withLock
+
+        withContext(Dispatchers.Main) {
+          deactivateLegacyCustomButtonsScript()
+        }
+
+        for ((language, scriptPath) in scriptPaths) {
+          val target = customButtonScriptTargetsByLanguage[language] ?: continue
+          val isLoaded = withContext(Dispatchers.Main) {
+            isCustomButtonsScriptLoaded(target)
+          }
+          if (isLoaded) continue
+
+          val file = File(scriptPath)
+          if (!file.exists()) {
+            android.util.Log.w("PlayerViewModel", "${target.fileName} missing during $reason, rebuilding")
+            rebuildNeeded = true
+            break
+          }
+
+          val loaded = withContext(Dispatchers.Main) {
+            loadCustomButtonsScript(file, target)
+          }
+          if (!loaded) {
+            android.util.Log.w("PlayerViewModel", "${target.fileName} load failed during $reason")
+          }
+        }
+      }
+      if (rebuildNeeded) {
+        setupCustomButtons()
+      }
+    }
+  }
+
+  private fun isCustomButtonsScriptLoaded(target: CustomButtonScriptTarget): Boolean =
+    runCatching { MPVLib.getPropertyString(target.loadedFlagProperty) == "1" }
+      .getOrDefault(false)
+
+  private fun loadCustomButtonsScript(
+    file: File,
+    target: CustomButtonScriptTarget,
+  ): Boolean {
+    runCatching { MPVLib.setPropertyString(target.loadedFlagProperty, "0") }
+
+    return runCatching {
+      MPVLib.command("load-script", file.absolutePath)
+      true
+    }.getOrElse {
+      android.util.Log.w("PlayerViewModel", "load-script failed for ${target.fileName}: ${it.message}")
+      false
+    }
+  }
+
+  private fun deactivateCustomButtonsScript(target: CustomButtonScriptTarget) {
+    runCatching {
+      MPVLib.setPropertyString(target.loadedFlagProperty, "0")
+      MPVLib.setPropertyString(target.versionProperty, "")
+    }
+  }
+
+  private fun deactivateLegacyCustomButtonsScript() {
+    runCatching {
+      MPVLib.setPropertyString(legacyCustomButtonsLoadedFlagProperty, "0")
+      MPVLib.setPropertyString(legacyCustomButtonsVersionProperty, "")
+    }
+  }
+
+  private fun deleteCustomButtonsScriptFiles(activePaths: Set<String> = emptySet()) {
+    runCatching {
+      val activeNames = activePaths.map { File(it).name }.toSet()
+      val scriptsDir = File(host.context.filesDir, "scripts")
+      customButtonScriptTargets.forEach { target ->
+        val file = File(scriptsDir, target.fileName)
+        if (file.exists() && file.name !in activeNames) {
+          file.delete()
+        }
+      }
+    }
+  }
+
+  private fun buildCustomButtonsScript(
+    body: String,
+    version: String,
+    target: CustomButtonScriptTarget,
+  ): String =
+    when (target.language) {
+      CustomButtonScriptLanguage.LUA ->
+        buildString {
+          appendLine("local loaded_flag_property = '${target.loadedFlagProperty.toScriptLiteral()}'")
+          appendLine("local version_property = '${target.versionProperty.toScriptLiteral()}'")
+          appendLine("local instance_version = '${version.toScriptLiteral()}'")
+          appendLine("if mp.get_property_native(version_property) == instance_version then")
+          appendLine("    mp.set_property_native(loaded_flag_property, '1')")
+          appendLine("    return")
+          appendLine("end")
+          appendLine("mp.set_property_native(version_property, instance_version)")
+          appendLine("mp.set_property_native(loaded_flag_property, '1')")
+          appendLine("local function is_active_instance()")
+          appendLine("    return mp.get_property_native(version_property) == instance_version")
+          appendLine("end")
+          appendLine()
+          append(body)
+        }
+
+      CustomButtonScriptLanguage.JS ->
+        buildString {
+          appendLine("var loadedFlagProperty = '${target.loadedFlagProperty.toScriptLiteral()}';")
+          appendLine("var versionProperty = '${target.versionProperty.toScriptLiteral()}';")
+          appendLine("var instanceVersion = '${version.toScriptLiteral()}';")
+          appendLine("if (mp.get_property_native(versionProperty) === instanceVersion) {")
+          appendLine("    mp.set_property_native(loadedFlagProperty, '1');")
+          appendLine("} else {")
+          appendLine("    mp.set_property_native(versionProperty, instanceVersion);")
+          appendLine("    mp.set_property_native(loadedFlagProperty, '1');")
+          appendLine("    var isActiveInstance = function() {")
+          appendLine("        return mp.get_property_native(versionProperty) === instanceVersion;")
+          appendLine("    };")
+          appendLine()
+          append(body.prependIndent("    "))
+          appendLine()
+          appendLine("}")
+        }
+    }
+
+  fun callCustomButton(id: String) {
+    val safeId = id.replace("-", "_")
+    MPVLib.command("script-message", "call_button_$safeId")
+  }
+
+  fun callCustomButtonLongPress(id: String) {
+    val safeId = id.replace("-", "_")
+    MPVLib.command("script-message", "call_button_long_$safeId")
+  }
+
+  private fun processButton(
+    originalId: String,
+    safeId: String,
+    label: String,
+    command: String,
+    longPressCommand: String,
+    onStartup: String,
+    language: CustomButtonScriptLanguage,
+    scriptBuilder: StringBuilder,
+    isLeft: Boolean,
+    uiList: MutableList<CustomButtonState>
+  ) {
+    if (label.isNotBlank()) {
+      uiList.add(CustomButtonState(originalId, label, isLeft))
+
+      // On Startup Code
+      if (onStartup.isNotBlank()) {
+        scriptBuilder.append(onStartup)
+        scriptBuilder.append("\n")
+      }
+
+      // Click Handler
+      if (command.isNotBlank()) {
+        scriptBuilder.appendButtonHandler(
+          functionName = "button_$safeId",
+          messageName = "call_button_$safeId",
+          command = command,
+          language = language,
+        )
+      }
+
+      // Long Press Handler
+      if (longPressCommand.isNotBlank()) {
+        scriptBuilder.appendButtonHandler(
+          functionName = "button_long_$safeId",
+          messageName = "call_button_long_$safeId",
+          command = longPressCommand,
+          language = language,
+        )
+      }
+    }
+
+  }
+
+  private fun StringBuilder.appendButtonHandler(
+    functionName: String,
+    messageName: String,
+    command: String,
+    language: CustomButtonScriptLanguage,
+  ) {
+    when (language) {
+      CustomButtonScriptLanguage.LUA -> {
+        append(
+          """
+          function $functionName()
+              if not is_active_instance() then return end
+              $command
+          end
+          mp.register_script_message('$messageName', $functionName)
+          """.trimIndent()
+        )
+      }
+      CustomButtonScriptLanguage.JS -> {
+        append(
+          """
+          var $functionName = function() {
+              if (!isActiveInstance()) return;
+              $command
+          };
+          mp.register_script_message('$messageName', $functionName);
+          """.trimIndent()
+        )
+      }
+    }
+    append("\n")
+  }
+
+  private fun String.toScriptLiteral(): String =
+    replace("\\", "\\\\").replace("'", "\\'")
+
+  // Cached values
+  private val doubleTapToSeekDuration by lazy { gesturePreferences.doubleTapToSeekDuration.get() }
+  private val inputMethodManager by lazy {
+    host.context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+  }
+
+  // Seek coalescing for smooth performance
+  private var pendingSeekOffset: Int = 0
+  private var seekCoalesceJob: Job? = null
+
+  private companion object {
+    const val TAG = "PlayerViewModel"
+    const val AUTO_SHOW_SKIP_CHIP_DURATION = 10.0
+    const val SEEK_COALESCE_DELAY_MS = 60L
+    const val SEEK_THUMBNAIL_MAX_SIZE = 240
+    const val SEEK_THUMBNAIL_CACHE_KB = 16 * 1024
+    const val SEEK_THUMBNAIL_CACHE_BUCKETS_PER_SECOND = 1f
+    const val SEEK_THUMBNAIL_PREFETCH_RADIUS = 2
+    const val PLAYLIST_METADATA_PREFETCH_RADIUS = 40
+    const val PLAYLIST_METADATA_PREFETCH_LIMIT = 120
+    const val MIN_INTRO_MARKER_DURATION_SEC = 480.0
+    const val INTRO_MARKER_CACHE_PREFS = "intro_marker_cache"
+    const val INTRO_MARKER_CACHE_PREFIX = "intro_marker:"
+    const val INTRO_MARKER_CACHE_MAX_ENTRIES = 200
+    const val INTRO_MARKER_CACHE_TTL_MS = 30L * 24L * 60L * 60L * 1000L
+    const val INTRO_MARKER_CACHE_LOADED = "loaded"
+    const val INTRO_MARKER_CACHE_NO_SEGMENTS = "no_segments"
+    const val INTRO_MARKER_CACHE_UNRESOLVED = "unresolved"
+    val VALID_SUBTITLE_EXTENSIONS =
+      setOf(
+        // Common & modern
+        "srt", "vtt", "ass", "ssa",
+        // DVD / Blu-ray
+        "sub", "idx", "sup",
+        // Streaming / XML / Professional
+        "xml", "ttml", "dfxp", "itt", "ebu", "imsc", "usf",
+        // Online platforms
+        "sbv", "srv1", "srv2", "srv3", "json",
+        // Legacy & niche
+        "sami", "smi", "mpl", "pjs", "stl", "rt", "psb", "cap",
+        // Broadcast captions
+        "scc", "vttx",
+        // Karaoke / lyrics
+        "lrc", "krc",
+        // Fallback / raw text
+        "txt", "pgs"
+      )
+  }
+
+  // ==================== Timer ====================
+
+  fun startTimer(seconds: Int) {
+    timerJob?.cancel()
+    _remainingTime.value = seconds
+    if (seconds < 1) return
+
+    timerJob =
+      viewModelScope.launch {
+        for (time in seconds downTo 0) {
+          _remainingTime.value = time
+          delay(1000)
+        }
+        MPVLib.setPropertyBoolean("pause", true)
+        showToast(host.context.getString(R.string.toast_sleep_timer_ended))
+      }
+  }
+
+  // ==================== Decoder ====================
+
+  // ==================== Audio/Subtitle Management ====================
+
+  fun addAudio(uri: Uri) {
+    viewModelScope.launch(Dispatchers.IO) {
+      runCatching {
+        val path =
+          uri.resolveUri(host.context)
+            ?: return@launch withContext(Dispatchers.Main) {
+              showToast("Failed to load audio file: Invalid URI")
+            }
+
+        withContext(Dispatchers.Main) {
+          MPVLib.command("audio-add", path, "cached")
+          showToast("Audio track added")
+        }
+      }.onFailure { e ->
+        withContext(Dispatchers.Main) {
+          showToast("Failed to load audio: ${e.message}")
+        }
+        android.util.Log.e("PlayerViewModel", "Error adding audio", e)
+      }
+    }
+  }
+
+  fun addSubtitle(uri: Uri, select: Boolean = true, silent: Boolean = false) {
+    viewModelScope.launch(Dispatchers.IO) {
+      addSubtitleSuspend(uri, select, silent)
+    }
+  }
+
+  suspend fun addSubtitleSuspend(uri: Uri, select: Boolean = true, silent: Boolean = false) {
+      subtitleAddMutex.withLock {
+        val uriString = uri.toString()
+        if (_externalSubtitles.contains(uriString)) {
+          android.util.Log.d("PlayerViewModel", "Subtitle already tracked, skipping: $uriString")
+          return@withLock
+        }
+
+        runCatching {
+          val fileName = getFileNameFromUri(uri) ?: "subtitle.srt"
+
+          if (!isValidSubtitleFile(fileName)) {
+            return@withLock withContext(Dispatchers.Main) {
+              showToast("Invalid subtitle file format")
+            }
+          }
+
+          // Take persistent URI permission for content:// URIs
+          if (uri.scheme == "content") {
+            try {
+              host.context.contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+              )
+            } catch (e: SecurityException) {
+              // Permission already granted, not available, or not needed (e.g. from tree).
+              android.util.Log.i("PlayerViewModel", "Persistent permission not taken for $uri (may already have it via tree)")
+            }
+          }
+
+          val mpvPath = uri.resolveUri(host.context) ?: uri.toString()
+          val mode = if (select) "select" else "auto"
+
+          // Check if MPV already auto-loaded this subtitle (prevents duplication)
+          val existingTrack = subtitleTracks.value.find { it.externalFilename == mpvPath }
+          if (existingTrack != null) {
+            android.util.Log.d("PlayerViewModel", "Subtitle already loaded by MPV, skipping sub-add: $mpvPath")
+            if (select) {
+              withContext(Dispatchers.Main) {
+                runCatching { MPVLib.setPropertyInt("sid", existingTrack.id) }
+              }
+            }
+            // Still track it in _externalSubtitles if it's not there
+            if (!_externalSubtitles.contains(uriString)) {
+              _externalSubtitles.add(uriString)
+            }
+            return@withLock
+          }
+
+          // Store mapping for reliable physical deletion later
+          mpvPathToUriMap[mpvPath] = uri.toString()
+
+          withContext(Dispatchers.Main) {
+            MPVLib.command("sub-add", mpvPath, mode)
+          }
+
+          // Track external subtitle URI for persistence
+          if (!_externalSubtitles.contains(uriString)) {
+            _externalSubtitles.add(uriString)
+          }
+
+          val displayName = fileName.take(30).let { if (fileName.length > 30) "$it..." else it }
+          if (!silent) {
+            withContext(Dispatchers.Main) {
+              showToast("$displayName added")
+            }
+          }
+        }.onFailure {
+          if (!silent) {
+            withContext(Dispatchers.Main) {
+              showToast("Failed to load subtitle")
+            }
+          }
+        }
+      }
+  }
+
+  private fun scanLocalSubtitles(mediaTitle: String) {
+    viewModelScope.launch(Dispatchers.IO) {
+      val saveFolderUri = subtitlesPreferences.subtitleSaveFolder.get()
+      if (saveFolderUri.isBlank()) return@launch
+
+      var addedCount = 0
+      try {
+        val sanitizedTitle = MediaInfoParser.parse(mediaTitle).title
+        val fullTitle = mediaTitle.substringBeforeLast(".")
+        val checksumTitle = ChecksumUtils.getCRC32(mediaTitle)
+        val parentDirs = resolveSubtitleLookupDirectories(host.context, saveFolderUri)
+        if (parentDirs.isEmpty()) return@launch
+
+        // Scan potential folder names for compatibility: checksum, full, and sanitized
+        // Use seenUris so the same file found via multiple folder name variants isn't double-added
+        val seenUris = mutableSetOf<String>()
+        parentDirs.forEach { parentDir ->
+          listOf(checksumTitle, fullTitle, sanitizedTitle).distinct().forEach { folderName ->
+            val movieDir = parentDir.findFile(folderName) ?: return@forEach
+            if (movieDir.isDirectory) {
+              movieDir.listFiles().forEach { file ->
+                val uriStr = file.uri.toString()
+                if (file.isFile && isValidSubtitleFile(file.name ?: "") && seenUris.add(uriStr)) {
+                  // Don't auto-select during scan, just make available.
+                  addSubtitle(file.uri, select = false, silent = true)
+                  addedCount++
+                }
+              }
+            }
+          }
+        }
+      } catch (e: Exception) {
+        android.util.Log.e("PlayerViewModel", "Error scanning local subtitles: ${e.message}", e)
+      }
+
+      // Auto-select the first external subtitle if the video has no embedded subtitle track active
+      if (addedCount > 0) {
+        // Give MPV time to register the sub-add commands
+        kotlinx.coroutines.delay(300)
+        withContext(Dispatchers.Main) {
+          val activeSid = getTrackSelectionId("sid")
+          if (activeSid == 0) {
+            val firstExternal = subtitleTracks.value.firstOrNull { it.external == true }
+            if (firstExternal != null) {
+              runCatching { setTrackSelectionId("sid", firstExternal.id) }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  fun setMediaTitle(mediaTitle: String) {
+    if (currentMediaTitle != mediaTitle) {
+      currentMediaTitle = mediaTitle
+      lastAutoSelectedMediaTitle = null
+      introLookupJob?.cancel()
+      pendingIntroLookupTitle = null
+      videoHashJob?.cancel()
+      // Clear external subtitles when media changes
+      _externalSubtitles.clear()
+      // Reset subtitle hash when media changes.
+      _videoHash.value = null
+      // Scan for previously downloaded/added subtitles
+      scanLocalSubtitles(mediaTitle)
+
+      // Restore persisted aspect mode, while zoom and pan continue to reset per file.
+      restoreSavedVideoAspect(showUpdate = false)
+      skippedSegmentTypes.clear()
+      chapterDerivedSegments = emptyList()
+      introDbSegments = emptyList()
+      _skipSegments.value = emptyList()
+      skipSegmentsSnapshot = emptyList()
+      _currentSkippableSegment.value = null
+      _showSkipChipAuto.value = false
+      _introDbStatus.value =
+        if (playerPreferences.enableIntroDb.get()) {
+          IntroDbStatus()
+        } else {
+          IntroDbStatus(
+            state = IntroDbStatusState.DISABLED,
+            message = "Online skip markers are disabled",
+          )
+        }
+      lookupIntroSegments(mediaTitle)
+
+      // 2. Reset Video Zoom
+      if (_videoZoom.value != 0f) {
+          _videoZoom.value = 0f
+          runCatching { MPVLib.setPropertyDouble("video-zoom", 0.0) }
+      }
+
+      // 3. Reset Video Pan
+      if (_videoPanX.value != 0f || _videoPanY.value != 0f) {
+          _videoPanX.value = 0f
+          _videoPanY.value = 0f
+          runCatching {
+              MPVLib.setPropertyDouble("video-pan-x", 0.0)
+              MPVLib.setPropertyDouble("video-pan-y", 0.0)
+          }
+      }
+      // ---------------------------------------------------
+    }
+  }
+
+  private fun maybeAutoSkipIntro(positionSeconds: Double) {
+    val activeSegment =
+      skipSegmentsSnapshot.firstOrNull { segment ->
+        positionSeconds in segment.startSeconds..segment.endSeconds && (segment.endSeconds - positionSeconds) >= 1.0
+      }
+    runCatching {
+      _currentSkippableSegment.value = activeSegment
+      _showSkipChipAuto.value =
+        activeSegment != null && (positionSeconds - activeSegment.startSeconds) < AUTO_SHOW_SKIP_CHIP_DURATION
+    }
+
+    if (paused == true || activeSegment == null) return
+    if (skippedSegmentTypes.contains(activeSegment.type)) return
+    val autoSkipEnabled =
+      when (activeSegment.type) {
+        SkipSegmentType.INTRO -> playerPreferences.autoSkipIntro.get()
+        SkipSegmentType.RECAP -> playerPreferences.autoSkipIntro.get()
+        SkipSegmentType.OUTRO -> playerPreferences.autoSkipOutro.get()
+        SkipSegmentType.CREDITS -> playerPreferences.autoSkipOutro.get()
+        SkipSegmentType.PREVIEW -> playerPreferences.autoSkipOutro.get()
+      }
+    if (!autoSkipEnabled) return
+
+    skippedSegmentTypes += activeSegment.type
+    MPVLib.setPropertyDouble("time-pos", activeSegment.endSeconds)
+    showToast("${activeSegment.label} (auto)")
+  }
+
+  fun skipActiveSegment() {
+    val segment = _currentSkippableSegment.value ?: return
+    skippedSegmentTypes += segment.type
+    MPVLib.setPropertyDouble("time-pos", segment.endSeconds)
+    showToast("${segment.label}")
+  }
+
+  private fun mergeSkipSegments() {
+    val merged =
+      (resolveIntroDbSegments() + chapterDerivedSegments)
+        .filter { it.isValid }
+        .sortedBy { it.startSeconds }
+        .distinctBy { Triple(it.type, it.startSeconds.toInt(), it.endSeconds.toInt()) }
+    skipSegmentsSnapshot = merged
+    _skipSegments.value = merged
+  }
+
+  private fun currentDurationSeconds(): Double =
+    (_preciseDuration.value.takeIf { it > 0f } ?: (duration ?: 0).toFloat()).toDouble()
+
+  private fun resolveIntroDbSegments(): List<SkipSegment> {
+    val durationSec = currentDurationSeconds()
+    return introDbSegments.mapNotNull { it.toSkipSegment(durationSec) }
+  }
+
+  private fun lookupIntroSegments(mediaTitle: String) {
+    if (!playerPreferences.enableIntroDb.get()) {
+      pendingIntroLookupTitle = null
+      introDbSegments = emptyList()
+      mergeSkipSegments()
+      return
+    }
+
+    val durationSec = currentDurationSeconds()
+    if (durationSec > 0 && durationSec < MIN_INTRO_MARKER_DURATION_SEC) {
+      pendingIntroLookupTitle = null
+      return
+    }
+
+    if (durationSec <= 0) {
+      pendingIntroLookupTitle = mediaTitle
+      return
+    }
+
+    pendingIntroLookupTitle = null
+
+    val lookupKey = mediaTitle
+    val provider = playerPreferences.introSegmentProvider.get()
+    val lookupHints = host.currentPlayerLookupHints()
+    val lookupRequest =
+      IntroDbLookupRequest(
+        mediaTitle = mediaTitle,
+        canonicalTitle = lookupHints.canonicalTitle,
+        lookupHint = host.currentMediaLookupHint(),
+        imdbId = lookupHints.imdbId,
+        tmdbId = lookupHints.tmdbId,
+        mediaType = lookupHints.mediaType,
+        season = lookupHints.season,
+        episode = lookupHints.episode,
+        provider = provider,
+      )
+    val cacheKey = buildIntroMarkerCacheKey(lookupRequest)
+
+    introDbSourceKey = provider.sourceKey
+    readIntroMarkerCacheEntry(cacheKey)?.let { cachedEntry ->
+      applyIntroMarkerCacheEntry(provider, cachedEntry)
+      mergeSkipSegments()
+      showProviderStatusFeedback(_introDbStatus.value.message)
+      return
+    }
+    _introDbStatus.value =
+      IntroDbStatus(
+        state = IntroDbStatusState.LOOKING_UP,
+        message = "${provider.displayName}: matching title",
+      )
+
+    introLookupJob?.cancel()
+    introLookupJob =
+      viewModelScope.launch {
+        val outcome = if (provider == IntroSegmentProvider.HYBRID) {
+          val channel = kotlinx.coroutines.channels.Channel<IntroDbLookupOutcome>(4)
+          val lookupJobs = listOf(
+              IntroSegmentProvider.INTRO_DB,
+              IntroSegmentProvider.THE_INTRO_DB,
+              IntroSegmentProvider.ANI_SKIP,
+              IntroSegmentProvider.ANIME_SKIP
+          ).map { p ->
+              launch(kotlinx.coroutines.Dispatchers.IO) {
+                  try {
+                      val res = introDbRepository.lookupSegments(lookupRequest.copy(provider = p))
+                      channel.send(res)
+                  } catch (e: Exception) {
+                      channel.send(IntroDbLookupOutcome.Error(e.message ?: "unknown", p))
+                  }
+              }
+          }
+
+          var finalOutcome: IntroDbLookupOutcome? = null
+          var loadedOutcome: IntroDbLookupOutcome.Loaded? = null
+          val receivedOutcomes = mutableListOf<IntroDbLookupOutcome>()
+
+          for (i in 0 until 4) {
+              val out = channel.receive()
+              receivedOutcomes.add(out)
+              if (out is IntroDbLookupOutcome.Loaded) {
+                  loadedOutcome = out
+                  break
+              }
+          }
+
+          // Cancel remaining lookup jobs if we got a loaded outcome
+          lookupJobs.forEach { it.cancel() }
+
+          if (loadedOutcome != null) {
+              IntroDbLookupOutcome.Loaded(
+                  imdbId = loadedOutcome.imdbId,
+                  segments = loadedOutcome.segments,
+                  source = loadedOutcome.source,
+                  provider = IntroSegmentProvider.HYBRID
+              )
+          } else {
+              val firstNonError = receivedOutcomes.firstOrNull { it !is IntroDbLookupOutcome.Error }
+              val fallbackOutcome = firstNonError ?: receivedOutcomes.firstOrNull()
+              
+              if (fallbackOutcome != null) {
+                  when (fallbackOutcome) {
+                      is IntroDbLookupOutcome.NoSegments -> IntroDbLookupOutcome.NoSegments(fallbackOutcome.imdbId, fallbackOutcome.source, IntroSegmentProvider.HYBRID)
+                      is IntroDbLookupOutcome.Unresolved -> IntroDbLookupOutcome.Unresolved(fallbackOutcome.title, IntroSegmentProvider.HYBRID)
+                      is IntroDbLookupOutcome.Error -> IntroDbLookupOutcome.Error(fallbackOutcome.reason, IntroSegmentProvider.HYBRID)
+                      else -> fallbackOutcome
+                  }
+              } else {
+                  IntroDbLookupOutcome.Error("No outcomes", IntroSegmentProvider.HYBRID)
+              }
+          }
+        } else {
+          introDbRepository.lookupSegments(lookupRequest)
+        }
+
+        if (currentMediaTitle != lookupKey) return@launch
+
+        applyIntroDbOutcome(outcome)
+        cacheIntroDbOutcome(cacheKey, outcome)
+        mergeSkipSegments()
+        showProviderStatusFeedback(_introDbStatus.value.message)
+      }
+  }
+
+  private fun showProviderStatusFeedback(message: String) {
+    if (message.isBlank() || !playerPreferences.showProviderStatusOverlay.get()) return
+    playerUpdate.value = PlayerUpdates.ProviderStatusText(message)
+  }
+
+  private fun showProviderStatusToast(message: String) {
+    if (message.isBlank() || !playerPreferences.showProviderStatusOverlay.get()) return
+    showToast(message)
+  }
+
+  private fun checkPendingIntroLookup() {
+    val pendingTitle = pendingIntroLookupTitle ?: return
+    val durationSec = currentDurationSeconds()
+    if (durationSec <= 0) return
+    pendingIntroLookupTitle = null
+    if (durationSec < MIN_INTRO_MARKER_DURATION_SEC) return
+    lookupIntroSegments(pendingTitle)
+  }
+
+  private fun buildIntroMarkerCacheKey(request: IntroDbLookupRequest): String =
+    buildString {
+      append(request.provider.sourceKey)
+      append('|')
+      append(request.lookupHint.orEmpty())
+      append('|')
+      append(request.mediaTitle)
+      append('|')
+      append(request.canonicalTitle.orEmpty())
+      append('|')
+      append(request.imdbId.orEmpty())
+      append('|')
+      append(request.tmdbId?.toString().orEmpty())
+      append('|')
+      append(request.mediaType.orEmpty())
+      append('|')
+      append(request.season?.toString().orEmpty())
+      append('|')
+      append(request.episode?.toString().orEmpty())
+    }.md5()
+
+  private fun readIntroMarkerCacheEntry(
+    cacheKey: String,
+  ): IntroMarkerCacheEntry? {
+    val prefKey = INTRO_MARKER_CACHE_PREFIX + cacheKey
+    val rawValue = introMarkerCachePrefs.getString(prefKey, null) ?: return null
+    val entry =
+      runCatching { json.decodeFromString<IntroMarkerCacheEntry>(rawValue) }
+        .getOrElse {
+          introMarkerCachePrefs.edit().remove(prefKey).apply()
+          return null
+        }
+
+    if ((System.currentTimeMillis() - entry.cachedAtMs) > INTRO_MARKER_CACHE_TTL_MS) {
+      introMarkerCachePrefs.edit().remove(prefKey).apply()
+      return null
+    }
+
+    return entry
+  }
+
+  private fun cacheIntroDbOutcome(
+    cacheKey: String,
+    outcome: IntroDbLookupOutcome,
+  ) {
+    val cacheEntry =
+      when (outcome) {
+        is IntroDbLookupOutcome.Loaded ->
+          IntroMarkerCacheEntry(
+            providerSourceKey = outcome.provider.sourceKey,
+            outcomeType = INTRO_MARKER_CACHE_LOADED,
+            imdbId = outcome.imdbId,
+            message = outcome.message,
+            segments = outcome.segments,
+          )
+
+        is IntroDbLookupOutcome.NoSegments ->
+          IntroMarkerCacheEntry(
+            providerSourceKey = outcome.provider.sourceKey,
+            outcomeType = INTRO_MARKER_CACHE_NO_SEGMENTS,
+            imdbId = outcome.imdbId,
+            message = outcome.message,
+          )
+
+        is IntroDbLookupOutcome.Unresolved ->
+          IntroMarkerCacheEntry(
+            providerSourceKey = outcome.provider.sourceKey,
+            outcomeType = INTRO_MARKER_CACHE_UNRESOLVED,
+            message = outcome.message,
+          )
+
+        is IntroDbLookupOutcome.Error -> null
+      } ?: return
+
+    introMarkerCachePrefs
+      .edit()
+      .putString(
+        INTRO_MARKER_CACHE_PREFIX + cacheKey,
+        json.encodeToString(IntroMarkerCacheEntry.serializer(), cacheEntry),
+      ).apply()
+    trimIntroMarkerCache()
+  }
+
+  private fun trimIntroMarkerCache() {
+    val cacheEntries =
+      introMarkerCachePrefs.all
+        .mapNotNull { (key, value) ->
+          if (!key.startsWith(INTRO_MARKER_CACHE_PREFIX) || value !is String) {
+            return@mapNotNull null
+          }
+          val entry =
+            runCatching { json.decodeFromString<IntroMarkerCacheEntry>(value) }.getOrNull()
+              ?: return@mapNotNull key to null
+          key to entry
+        }
+
+    if (cacheEntries.size <= INTRO_MARKER_CACHE_MAX_ENTRIES) return
+
+    val keysToRemove =
+      cacheEntries
+        .sortedBy { (_, entry) -> entry?.cachedAtMs ?: Long.MIN_VALUE }
+        .take(cacheEntries.size - INTRO_MARKER_CACHE_MAX_ENTRIES)
+        .map { it.first }
+
+    introMarkerCachePrefs.edit().apply {
+      keysToRemove.forEach(::remove)
+    }.apply()
+  }
+
+  private fun applyIntroMarkerCacheEntry(
+    provider: IntroSegmentProvider,
+    entry: IntroMarkerCacheEntry,
+  ) {
+    introDbSourceKey = entry.providerSourceKey
+    when (entry.outcomeType) {
+      INTRO_MARKER_CACHE_LOADED -> {
+        introDbSegments = entry.segments
+        _introDbStatus.value =
+          IntroDbStatus(
+            state = IntroDbStatusState.LOADED,
+            message = cacheStatusMessage(provider, entry.message, "loaded ${entry.segments.size} marker${if (entry.segments.size == 1) "" else "s"}"),
+            imdbId = entry.imdbId,
+            segmentCount = entry.segments.size,
+          )
+      }
+
+      INTRO_MARKER_CACHE_NO_SEGMENTS -> {
+        introDbSegments = emptyList()
+        _introDbStatus.value =
+          IntroDbStatus(
+            state = IntroDbStatusState.NO_SEGMENTS,
+            message = cacheStatusMessage(provider, entry.message, "no markers cached"),
+            imdbId = entry.imdbId,
+          )
+      }
+
+      else -> {
+        introDbSegments = emptyList()
+        _introDbStatus.value =
+          IntroDbStatus(
+            state = IntroDbStatusState.UNRESOLVED,
+            message = cacheStatusMessage(provider, entry.message, "cached title match failed"),
+          )
+      }
+    }
+  }
+
+  private fun applyIntroDbOutcome(outcome: IntroDbLookupOutcome) {
+    when (outcome) {
+      is IntroDbLookupOutcome.Loaded -> {
+        introDbSegments = outcome.segments
+        introDbSourceKey = outcome.provider.sourceKey
+        _introDbStatus.value =
+          IntroDbStatus(
+            state = IntroDbStatusState.LOADED,
+            message = outcome.message,
+            imdbId = outcome.imdbId,
+            segmentCount = outcome.segments.size,
+          )
+      }
+
+      is IntroDbLookupOutcome.NoSegments -> {
+        introDbSegments = emptyList()
+        introDbSourceKey = outcome.provider.sourceKey
+        _introDbStatus.value =
+          IntroDbStatus(
+            state = IntroDbStatusState.NO_SEGMENTS,
+            message = outcome.message,
+            imdbId = outcome.imdbId,
+          )
+      }
+
+      is IntroDbLookupOutcome.Unresolved -> {
+        introDbSegments = emptyList()
+        introDbSourceKey = outcome.provider.sourceKey
+        _introDbStatus.value =
+          IntroDbStatus(
+            state = IntroDbStatusState.UNRESOLVED,
+            message = outcome.message,
+          )
+      }
+
+      is IntroDbLookupOutcome.Error -> {
+        introDbSegments = emptyList()
+        introDbSourceKey = outcome.provider.sourceKey
+        _introDbStatus.value =
+          IntroDbStatus(
+            state = IntroDbStatusState.ERROR,
+            message = outcome.message,
+          )
+      }
+    }
+  }
+
+  private fun cacheStatusMessage(
+    provider: IntroSegmentProvider,
+    message: String,
+    fallback: String,
+  ): String {
+    val sourceMessage = message.ifBlank { "${provider.displayName}: $fallback" }
+    return if (sourceMessage.contains("(cached)")) sourceMessage else "$sourceMessage (cached)"
+  }
+
+  private fun refreshChapterDerivedSegments(chapters: List<dev.vivvvek.seeker.Segment>) {
+    if (!playerPreferences.detectIntroOutroFromChapters.get()) {
+      chapterDerivedSegments = emptyList()
+      mergeSkipSegments()
+      return
+    }
+    val durationSec = currentDurationSeconds()
+    if (durationSec <= 0.0 || chapters.isEmpty()) {
+      chapterDerivedSegments = emptyList()
+      mergeSkipSegments()
+      return
+    }
+
+    val derived =
+      chapters.mapIndexedNotNull { index, segment ->
+        val type = chapterTitleToType(segment.name) ?: return@mapIndexedNotNull null
+        val start = segment.start.toDouble()
+        val end = chapters.getOrNull(index + 1)?.start?.toDouble() ?: durationSec
+        val normalizedEnd = end.coerceAtMost(durationSec)
+        if (normalizedEnd - start < 5.0) return@mapIndexedNotNull null
+        val durationFraction = start / durationSec
+        when (type) {
+          SkipSegmentType.INTRO -> if (durationFraction > 0.5) return@mapIndexedNotNull null
+          SkipSegmentType.OUTRO -> if (durationFraction < 0.4) return@mapIndexedNotNull null
+          else -> {}
+        }
+        SkipSegment(type = type, startSeconds = start, endSeconds = normalizedEnd, source = "chapter")
+      }
+
+    chapterDerivedSegments = derived
+    mergeSkipSegments()
+  }
+
+  private fun chapterTitleToType(title: String?): SkipSegmentType? {
+    if (title.isNullOrBlank()) return null
+    val lowered = title.lowercase()
+    val normalizedLatin = lowered.replace(Regex("""[^a-z0-9]+"""), " ").trim()
+    val compactLatin = normalizedLatin.replace(" ", "")
+    val compactRaw = lowered.replace(Regex("""[\s\p{Punct}・_]+"""), "")
+
+    fun hasKeyword(keywords: List<String>): Boolean =
+      keywords.any { rawKeyword ->
+        val keyword = rawKeyword.lowercase()
+        when {
+          keyword.matches(Regex("""[a-z0-9]+""")) -> {
+            normalizedLatin.contains(Regex("""(?:^|\s)${Regex.escape(keyword)}(?:\s|$)""")) ||
+              (keyword.length >= 4 && compactLatin.contains(keyword))
+          }
+          else -> compactRaw.contains(keyword.replace(" ", ""))
+        }
+      }
+
+    val introKeywords = if (playerPreferences.customIntroKeywordsEnabled.get()) {
+      playerPreferences.customIntroKeywords.get()
+        .split(",")
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+    } else {
+      introKeywordPatterns
+    }
+
+    val outroKeywords = if (playerPreferences.customOutroKeywordsEnabled.get()) {
+      playerPreferences.customOutroKeywords.get()
+        .split(",")
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+    } else {
+      outroKeywordPatterns
+    }
+
+    val hasIntro = hasKeyword(introKeywords)
+    val hasRecap = hasKeyword(recapKeywordPatterns)
+    val hasCredits = hasKeyword(creditsKeywordPatterns)
+    val hasPreview = hasKeyword(previewKeywordPatterns)
+    val hasOutro = hasKeyword(outroKeywords)
+    return when {
+      hasRecap -> SkipSegmentType.RECAP
+      hasCredits -> SkipSegmentType.CREDITS
+      hasPreview -> SkipSegmentType.PREVIEW
+      hasOutro && !hasIntro -> SkipSegmentType.OUTRO
+      hasIntro -> SkipSegmentType.INTRO
+      else -> null
+    }
+  }
+
+  private fun io.alwayszihan.zeroxpv.repository.IntroDbSegment.toSkipSegment(durationSec: Double): SkipSegment? {
+    val loweredType = segmentType?.lowercase().orEmpty()
+    val type =
+      when {
+        "recap" in loweredType || "summary" in loweredType -> SkipSegmentType.RECAP
+        "credit" in loweredType -> SkipSegmentType.CREDITS
+        "preview" in loweredType -> SkipSegmentType.PREVIEW
+        "out" in loweredType || "ending" in loweredType -> SkipSegmentType.OUTRO
+        else -> SkipSegmentType.INTRO
+      }
+    val endSeconds =
+      endSecondsOrNull ?: durationSec.takeIf {
+        (type == SkipSegmentType.CREDITS || type == SkipSegmentType.PREVIEW) && it > normalizedStart
+      }
+      ?: return null
+    if (endSeconds <= normalizedStart) return null
+    return SkipSegment(
+      type = type,
+      startSeconds = normalizedStart,
+      endSeconds = endSeconds,
+      source = introDbSourceKey,
+    )
+  }
+
+
+  fun removeSubtitle(id: Int) {
+    viewModelScope.launch(Dispatchers.IO) {
+      // Find the subtitle track info before removing
+      val tracks = subtitleTracks.value
+      val trackToRemove = tracks.firstOrNull { it.id == id }
+
+      // If it's external, physically delete the file if we can find its URI
+      if (trackToRemove?.external == true && trackToRemove.externalFilename != null) {
+        val mpvPath = trackToRemove.externalFilename
+        val originalUriString = mpvPathToUriMap[mpvPath] ?: mpvPath
+        val uri = Uri.parse(originalUriString)
+
+        val deleted = wyzieRepository.deleteSubtitleFile(uri)
+
+        if (deleted) {
+          _externalSubtitles.remove(originalUriString)
+          mpvPathToUriMap.remove(mpvPath)
+          withContext(Dispatchers.Main) {
+            showToast("Subtitle deleted")
+          }
+        }
+      }
+
+        MPVLib.command("sub-remove", id.toString())
+    }
+  }
+
+  // --- Media Search and Series Management ---
+
+  private var mediaSearchJob: Job? = null
+
+  private data class WyzieSearchPlan(
+    val request: OnlineSubtitleSearchRequest?,
+    val missingSelectionMessage: String? = null,
+  )
+
+  fun searchMedia(query: String) {
+    mediaSearchJob?.cancel()
+    if (query.isBlank()) {
+      _mediaSearchResults.value = emptyList()
+      return
+    }
+
+    mediaSearchJob = viewModelScope.launch {
+      delay(300) // Debounce
+      _isSearchingMedia.value = true
+      wyzieRepository.searchMedia(query)
+        .onSuccess { results ->
+          _mediaSearchResults.value = results
+        }
+        .onFailure {
+          // Silent failure for autocomplete, or optionally show toast(if someone is reading this if u need u can impelmen this in future )
+        }
+      _isSearchingMedia.value = false
+    }
+  }
+
+  fun selectMedia(result: io.alwayszihan.zeroxpv.repository.wyzie.WyzieTmdbResult) {
+    _mediaSearchResults.value = emptyList() // Clear results after selection
+    _onlineSubtitleSearchResults.value = emptyList() // Clear old subtitle results
+    val fileInfo = MediaInfoParser.parse(currentMediaTitle)
+
+    if (result.mediaType == "tv") {
+      fetchTvShowDetails(
+        id = result.id,
+        preferredSeason = fileInfo.season,
+        preferredEpisode = fileInfo.episode,
+      )
+    } else {
+      searchSubtitles(result.title, year = result.releaseYear ?: fileInfo.year, tmdbId = result.id)
+    }
+  }
+
+  private fun fetchTvShowDetails(
+    id: Int,
+    preferredSeason: Int? = null,
+    preferredEpisode: Int? = null,
+  ) {
+    viewModelScope.launch {
+      _isFetchingTvDetails.value = true
+      wyzieRepository.getTvShowDetails(id)
+        .onSuccess { details ->
+          val validSeasons = details.seasons.filter { it.season_number > 0 }.sortedBy { it.season_number }
+          _selectedTvShow.value = details.copy(seasons = validSeasons)
+          _selectedSeason.value = null
+          _seasonEpisodes.value = emptyList()
+          val matchingSeason = preferredSeason?.let { wanted ->
+            validSeasons.firstOrNull { it.season_number == wanted }
+          }
+          if (matchingSeason != null) {
+            selectSeason(matchingSeason, preferredEpisode)
+          }
+        }
+        .onFailure {
+          showProviderStatusToast("Failed to load series details: ${it.message}")
+        }
+      _isFetchingTvDetails.value = false
+    }
+  }
+
+  fun selectSeason(
+    season: io.alwayszihan.zeroxpv.repository.wyzie.WyzieSeason,
+    preferredEpisode: Int? = null,
+  ) {
+    val tvShowId = _selectedTvShow.value?.id ?: return
+    _selectedSeason.value = season
+
+    viewModelScope.launch {
+      _isFetchingEpisodes.value = true
+      wyzieRepository.getSeasonEpisodes(tvShowId, season.season_number)
+        .onSuccess { episodes ->
+          val validEpisodes = episodes.filter { it.episode_number > 0 }.sortedBy { it.episode_number }
+          _seasonEpisodes.value = validEpisodes
+          val matchingEpisode = preferredEpisode?.let { wanted ->
+            validEpisodes.firstOrNull { it.episode_number == wanted }
+          }
+          _selectedEpisode.value = matchingEpisode
+          matchingEpisode?.let { episode ->
+            val tvShowName = _selectedTvShow.value?.name ?: currentMediaTitle
+            searchSubtitles(
+              query = tvShowName,
+              season = season.season_number,
+              episode = episode.episode_number,
+              tmdbId = tvShowId,
+            )
+          }
+        }
+        .onFailure {
+          showProviderStatusToast("Failed to load episodes: ${it.message}")
+        }
+      _isFetchingEpisodes.value = false
+    }
+  }
+
+  fun selectEpisode(episode: io.alwayszihan.zeroxpv.repository.wyzie.WyzieEpisode) {
+    _selectedEpisode.value = episode
+    val tvShowName = _selectedTvShow.value?.name ?: currentMediaTitle
+    searchSubtitles(tvShowName, episode.season_number, episode.episode_number, tmdbId = _selectedTvShow.value?.id)
+  }
+
+  fun clearMediaSelection() {
+    _selectedTvShow.value = null
+    _selectedSeason.value = null
+    _seasonEpisodes.value = emptyList()
+    _selectedEpisode.value = null
+    _mediaSearchResults.value = emptyList()
+  }
+
+  // --- Subtitle Search ---
+  fun searchOnlineSubtitles(query: String) {
+    val queryInfo = MediaInfoParser.parse(query)
+    val fileInfo = MediaInfoParser.parse(currentMediaTitle)
+    val searchTitle = queryInfo.title.ifBlank { query.trim() }.ifBlank { fileInfo.title }
+    if (searchTitle.isBlank()) return
+
+    val mode = subtitlesPreferences.onlineSubtitleSearchMode.get()
+    if (mode != OnlineSubtitleSearchMode.SUBHUB) {
+      searchMedia(searchTitle)
+    } else {
+      _mediaSearchResults.value = emptyList()
+    }
+
+    val year = queryInfo.year ?: fileInfo.year
+    val wyziePlan = buildWyzieSearchPlan(searchTitle, year, queryInfo, fileInfo)
+    val includeWyzie = mode != OnlineSubtitleSearchMode.SUBHUB && wyziePlan.request != null
+    val includeSubtitleHub = mode != OnlineSubtitleSearchMode.WYZIE
+
+    if (mode == OnlineSubtitleSearchMode.WYZIE && wyziePlan.request == null) {
+      wyziePlan.missingSelectionMessage?.let(::showToast)
+      _onlineSubtitleSearchResults.value = emptyList()
+      return
+    }
+
+    val wyzieRequest = wyziePlan.request ?: OnlineSubtitleSearchRequest(query = searchTitle, year = year)
+    searchSubtitles(
+      query = wyzieRequest.query,
+      season = wyzieRequest.season,
+      episode = wyzieRequest.episode,
+      year = wyzieRequest.year,
+      tmdbId = wyzieRequest.tmdbId,
+      includeWyzie = includeWyzie,
+      includeSubtitleHub = includeSubtitleHub,
+    )
+  }
+
+  fun searchSubtitles(
+    query: String,
+    season: Int? = null,
+    episode: Int? = null,
+    year: String? = null,
+    tmdbId: Int? = null,
+    includeWyzie: Boolean = true,
+    includeSubtitleHub: Boolean = true,
+  ) {
+     viewModelScope.launch {
+          _isSearchingSub.value = true
+          val cleanSubHubTitle = MediaInfoParser.parse(query).title.ifBlank { query.trim() }
+          val wyzieRequest =
+              OnlineSubtitleSearchRequest(
+                  query = query,
+                  tmdbId = tmdbId,
+                  season = season,
+                  episode = episode,
+                  year = year,
+                  movieHash = _videoHash.value,
+              )
+          val subtitleHubRequest =
+              OnlineSubtitleSearchRequest(
+                  query = cleanSubHubTitle,
+                  year = year,
+              )
+          onlineSubtitleOrchestrator.search(
+              wyzieRequest,
+              subtitlesPreferences.onlineSubtitleSearchMode.get(),
+              subtitleHubRequest = subtitleHubRequest,
+              includeWyzie = includeWyzie,
+              includeSubtitleHub = includeSubtitleHub,
+          )
+              .onSuccess { results ->
+                  _onlineSubtitleSearchResults.value = results
+             }
+             .onFailure {
+                 showProviderStatusToast("Search failed: ${it.message}")
+             }
+          _isSearchingSub.value = false
+      }
+   }
+
+  private fun buildWyzieSearchPlan(
+    searchTitle: String,
+    year: String?,
+    queryInfo: ParsedMediaInfo,
+    fileInfo: ParsedMediaInfo,
+  ): WyzieSearchPlan {
+    val selectedShow = _selectedTvShow.value
+    val selectedSeason = _selectedSeason.value?.season_number
+    val selectedEpisode = _selectedEpisode.value?.episode_number
+
+    if (selectedShow != null) {
+      if (selectedSeason == null || selectedEpisode == null) {
+        return WyzieSearchPlan(
+          request = null,
+          missingSelectionMessage = "Select season and episode for Wyzie.",
+        )
+      }
+      return WyzieSearchPlan(
+        request =
+          OnlineSubtitleSearchRequest(
+            query = selectedShow.name,
+            tmdbId = selectedShow.id,
+            season = selectedSeason,
+            episode = selectedEpisode,
+            year = year,
+            movieHash = _videoHash.value,
+          ),
+      )
+    }
+
+    val detectedSeason = queryInfo.season ?: fileInfo.season
+    val detectedEpisode = queryInfo.episode ?: fileInfo.episode
+    if (detectedSeason != null || detectedEpisode != null) {
+      return WyzieSearchPlan(
+        request = null,
+        missingSelectionMessage = "Select the show, season, and episode for Wyzie.",
+      )
+    }
+
+    return WyzieSearchPlan(
+      request =
+        OnlineSubtitleSearchRequest(
+          query = searchTitle,
+          year = year,
+          movieHash = _videoHash.value,
+        ),
+    )
+  }
+
+  fun downloadSubtitle(subtitle: OnlineSubtitle) {
+      viewModelScope.launch {
+          _isDownloadingSub.value = true
+          onlineSubtitleOrchestrator.download(subtitle, currentMediaTitle)
+              .onSuccess { uri ->
+                  if (subtitle.isHashMatch) {
+                    MPVLib.setPropertyDouble("sub-delay", 0.0)
+                    Log.d(TAG, "Applied perfect-sync subtitle match for ${subtitle.displayName}")
+                  }
+                  addSubtitle(uri)
+              }
+              .onFailure {
+                  showToast("Download failed: ${it.message}")
+              }
+          _isDownloadingSub.value = false
+      }
+  }
+
+
+  fun toggleSubtitle(id: Int) {
+    val primarySid = getTrackSelectionId("sid")
+    val secondarySid = getTrackSelectionId("secondary-sid")
+
+    val wasOff = primarySid <= 0 && secondarySid <= 0
+
+    when {
+      id == primarySid -> setTrackSelectionId("sid", null)
+      id == secondarySid -> setTrackSelectionId("secondary-sid", null)
+      primarySid <= 0 -> setTrackSelectionId("sid", id)
+      secondarySid <= 0 -> setTrackSelectionId("secondary-sid", id)
+      else -> setTrackSelectionId("sid", id)
+    }
+
+    if (wasOff && !subtitlesPreferences.autoEnableSubtitles.get()) {
+      subtitlesPreferences.autoEnableSubtitles.set(true)
+    }
+
+    syncSubtitleLayout()
+  }
+
+  fun isSubtitleSelected(id: Int): Boolean {
+    val primarySid = getTrackSelectionId("sid")
+    val secondarySid = getTrackSelectionId("secondary-sid")
+    return (id == primarySid && primarySid > 0) || (id == secondarySid && secondarySid > 0)
+  }
+
+  private fun getFileNameFromUri(uri: Uri): String? =
+    when (uri.scheme) {
+      "content" ->
+        host.context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+          val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+          if (nameIndex >= 0 && cursor.moveToFirst()) cursor.getString(nameIndex) else null
+        }
+
+      "file" -> uri.lastPathSegment
+      else -> uri.lastPathSegment
+    }
+
+  private fun isValidSubtitleFile(fileName: String): Boolean =
+    fileName.substringAfterLast('.', "").lowercase() in VALID_SUBTITLE_EXTENSIONS
+
+  // ==================== Playback Control ====================
+
+  fun pauseUnpause() {
+    viewModelScope.launch(Dispatchers.IO) {
+      val isPaused = MPVLib.getPropertyBoolean("pause") ?: false
+      if (isPaused) {
+        // We are about to unpause, so request focus
+        withContext(Dispatchers.Main) { host.requestAudioFocus() }
+        MPVLib.setPropertyBoolean("pause", false)
+      } else {
+        // We are about to pause
+        MPVLib.setPropertyBoolean("pause", true)
+        withContext(Dispatchers.Main) { host.abandonAudioFocus() }
+      }
+    }
+  }
+
+  fun pause() {
+    viewModelScope.launch(Dispatchers.IO) {
+      val isPaused = MPVLib.getPropertyBoolean("pause") ?: false
+      if (isPaused) return@launch
+      MPVLib.setPropertyBoolean("pause", true)
+      withContext(Dispatchers.Main) { host.abandonAudioFocus() }
+    }
+  }
+
+  fun unpause() {
+    viewModelScope.launch(Dispatchers.IO) {
+      val isPaused = MPVLib.getPropertyBoolean("pause") ?: false
+      if (!isPaused) return@launch
+      withContext(Dispatchers.Main) { host.requestAudioFocus() }
+      MPVLib.setPropertyBoolean("pause", false)
+    }
+  }
+
+  // ==================== UI Control ====================
+
+  fun showControls() {
+    if (sheetShown.value != Sheets.None || panelShown.value != Panels.None) return
+    try {
+      if (playerPreferences.showSystemStatusBar.get()) {
+        host.windowInsetsController.show(WindowInsetsCompat.Type.statusBars())
+        host.windowInsetsController.isAppearanceLightStatusBars = false
+      }
+      if (playerPreferences.showSystemNavigationBar.get()) {
+        host.windowInsetsController.show(WindowInsetsCompat.Type.navigationBars())
+      }
+    } catch (e: Exception) {
+      // Defensive: InsetsController animation can crash under FD pressure
+      // (e.g. during high-res HEVC playback on certain devices)
+      Log.e(TAG, "Failed to show system bars", e)
+    }
+    _controlsShown.value = true
+    controlsVisibleForPolling = true
+  }
+
+  fun hideControls() {
+    try {
+      host.windowInsetsController.hide(WindowInsetsCompat.Type.statusBars())
+      host.windowInsetsController.hide(WindowInsetsCompat.Type.navigationBars())
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to hide system bars", e)
+    }
+    _controlsShown.value = false
+    _seekBarShown.value = false
+    controlsVisibleForPolling = false
+    seekBarVisibleForPolling = false
+  }
+
+  fun autoHideControls() {
+    try {
+      host.windowInsetsController.hide(WindowInsetsCompat.Type.statusBars())
+      host.windowInsetsController.hide(WindowInsetsCompat.Type.navigationBars())
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to hide system bars", e)
+    }
+    _controlsShown.value = false
+    _seekBarShown.value = true
+    controlsVisibleForPolling = false
+    seekBarVisibleForPolling = true
+  }
+
+  fun showSeekBar() {
+    if (sheetShown.value == Sheets.None) {
+      _seekBarShown.value = true
+      seekBarVisibleForPolling = true
+    }
+  }
+
+  fun hideSeekBar() {
+    _seekBarShown.value = false
+    seekBarVisibleForPolling = false
+  }
+
+  fun updateSeekThumbnailPreview(
+    positionSeconds: Float,
+    durationSeconds: Float,
+  ) {
+    if (!playerPreferences.useThumbFastSeekPreview.get()) {
+      hideSeekThumbnailPreview()
+      return
+    }
+
+    if (host.isCurrentMediaKnownAudio() || isAudioOnly.value) {
+      hideSeekThumbnailPreview()
+      return
+    }
+
+    val clampedPosition =
+      if (durationSeconds > 0f) {
+        positionSeconds.coerceIn(0f, durationSeconds)
+      } else {
+        positionSeconds.coerceAtLeast(0f)
+      }
+    val fraction =
+      if (durationSeconds > 0f) {
+        (clampedPosition / durationSeconds).coerceIn(0f, 1f)
+      } else {
+        0f
+      }
+
+    val source = resolveSeekThumbnailSource()
+    if (source.isNullOrBlank()) {
+      _seekThumbnailPreview.update {
+        it.copy(
+          visible = true,
+          positionSeconds = clampedPosition,
+          fraction = fraction,
+          isLoading = false,
+        )
+      }
+      return
+    }
+
+    val bucket = seekThumbnailBucket(clampedPosition)
+    val cacheKey = seekThumbnailCacheKey(source, bucket)
+    val cachedBitmap = seekThumbnailCache.get(cacheKey)
+    val nearestCachedBitmap = cachedBitmap ?: findNearestSeekThumbnail(source, bucket)
+    _seekThumbnailPreview.update {
+      it.copy(
+        visible = true,
+        positionSeconds = clampedPosition,
+        fraction = fraction,
+        bitmap = nearestCachedBitmap ?: it.bitmap,
+        isLoading = nearestCachedBitmap == null && it.bitmap == null,
+      )
+    }
+
+    if (cachedBitmap != null || cacheKey == lastQueuedSeekThumbnailKey) return
+
+    val requestId = ++seekThumbnailRequestId
+    lastQueuedSeekThumbnailKey = cacheKey
+    synchronized(seekThumbnailRequestLock) {
+      pendingSeekThumbnailRequest =
+        SeekThumbnailRequest(
+          source = source,
+          positionSeconds = clampedPosition,
+          durationSeconds = durationSeconds,
+          bucket = bucket,
+          requestId = requestId,
+        )
+    }
+    ensureSeekThumbnailWorker()
+  }
+
+  private fun ensureSeekThumbnailWorker() {
+    if (seekThumbnailWorkerJob?.isActive == true) return
+
+    seekThumbnailWorkerJob =
+      viewModelScope.launch(seekThumbnailDispatcher) {
+        while (isActive) {
+          val request =
+            synchronized(seekThumbnailRequestLock) {
+              pendingSeekThumbnailRequest.also { pendingSeekThumbnailRequest = null }
+            } ?: break
+
+          val bitmap = loadSeekThumbnail(request.source, request.bucket, request.durationSeconds)
+          if (bitmap != null) {
+            publishSeekThumbnail(request, bitmap)
+          } else if (request.requestId == seekThumbnailRequestId) {
+            _seekThumbnailPreview.update { it.copy(isLoading = false) }
+          }
+
+          val hasNewerRequest =
+            synchronized(seekThumbnailRequestLock) {
+              pendingSeekThumbnailRequest != null
+            }
+          if (!hasNewerRequest) {
+            prefetchSeekThumbnails(request)
+          }
+        }
+      }
+  }
+
+  fun hideSeekThumbnailPreview() {
+    seekThumbnailWorkerJob?.cancel()
+    seekThumbnailWorkerJob = null
+    seekThumbnailRequestId++
+    lastQueuedSeekThumbnailKey = null
+    synchronized(seekThumbnailRequestLock) {
+      pendingSeekThumbnailRequest = null
+    }
+    _seekThumbnailPreview.update {
+      it.copy(
+        visible = false,
+        bitmap = null,
+        isLoading = false,
+      )
+    }
+  }
+
+  private fun loadSeekThumbnail(
+    source: String,
+    bucket: Int,
+    durationSeconds: Float,
+  ): Bitmap? {
+    val cacheKey = seekThumbnailCacheKey(source, bucket)
+    seekThumbnailCache.get(cacheKey)?.let { return it }
+
+    val thumbnailTime = seekThumbnailBucketTime(bucket, durationSeconds)
+    val bitmap =
+      runCatching {
+        // Native thumbfast path: generate the preview frame without seeking the active player.
+        MPVLib.grabThumbnailFast(source, thumbnailTime.toDouble(), SEEK_THUMBNAIL_MAX_SIZE)
+      }.getOrNull()
+
+    if (bitmap != null) {
+      seekThumbnailCache.put(cacheKey, bitmap)
+    }
+    return bitmap
+  }
+
+  private fun publishSeekThumbnail(
+    request: SeekThumbnailRequest,
+    bitmap: Bitmap,
+  ) {
+    _seekThumbnailPreview.update { current ->
+      if (!current.visible) {
+        current
+      } else {
+        current.copy(
+          bitmap = bitmap,
+          isLoading = false,
+        )
+      }
+    }
+  }
+
+  private fun prefetchSeekThumbnails(request: SeekThumbnailRequest) {
+    val maxBucket =
+      if (request.durationSeconds > 0f) {
+        seekThumbnailBucket(request.durationSeconds)
+      } else {
+        Int.MAX_VALUE
+      }
+    for (distance in 1..SEEK_THUMBNAIL_PREFETCH_RADIUS) {
+      val hasNewerRequest =
+        synchronized(seekThumbnailRequestLock) {
+          pendingSeekThumbnailRequest != null
+        }
+      if (hasNewerRequest) return
+
+      val nextBucket = request.bucket + distance
+      if (nextBucket <= maxBucket) {
+        loadSeekThumbnail(request.source, nextBucket, request.durationSeconds)
+      }
+
+      val previousBucket = request.bucket - distance
+      if (previousBucket >= 0) {
+        loadSeekThumbnail(request.source, previousBucket, request.durationSeconds)
+      }
+    }
+  }
+
+  private fun resolveSeekThumbnailSource(): String? =
+    host.currentThumbnailSource()?.takeIf { it.isNotBlank() }
+      ?: runCatching { MPVLib.getPropertyString("stream-open-filename") }.getOrNull()?.takeIf { it.isNotBlank() }
+      ?: runCatching { MPVLib.getPropertyString("path") }.getOrNull()?.takeIf { it.isNotBlank() }
+
+  private fun seekThumbnailBucket(positionSeconds: Float): Int =
+    (positionSeconds * SEEK_THUMBNAIL_CACHE_BUCKETS_PER_SECOND).roundToInt().coerceAtLeast(0)
+
+  private fun seekThumbnailBucketTime(
+    bucket: Int,
+    durationSeconds: Float,
+  ): Float =
+    (bucket / SEEK_THUMBNAIL_CACHE_BUCKETS_PER_SECOND)
+      .coerceAtLeast(0f)
+      .let { if (durationSeconds > 0f) it.coerceAtMost(durationSeconds) else it }
+
+  private fun seekThumbnailCacheKey(source: String, bucket: Int): String =
+    "$source|$bucket|$SEEK_THUMBNAIL_MAX_SIZE"
+
+  private fun findNearestSeekThumbnail(
+    source: String,
+    bucket: Int,
+  ): Bitmap? {
+    for (distance in 1..SEEK_THUMBNAIL_PREFETCH_RADIUS) {
+      seekThumbnailCache.get(seekThumbnailCacheKey(source, bucket - distance))?.let { return it }
+      seekThumbnailCache.get(seekThumbnailCacheKey(source, bucket + distance))?.let { return it }
+    }
+    return null
+  }
+
+  fun lockControls() {
+    _areControlsLocked.value = true
+  }
+
+  fun unlockControls() {
+    _areControlsLocked.value = false
+  }
+
+  // ==================== Seeking ====================
+
+  fun seekBy(offset: Int) {
+    coalesceSeek(offset)
+  }
+
+  fun seekTo(position: Int, fast: Boolean = false) {
+    viewModelScope.launch(Dispatchers.IO) {
+      val maxDuration = MPVLib.getPropertyInt("duration") ?: 0
+      var clampedPosition = position.coerceIn(0, maxDuration)
+
+      // Clamp within AB loop if active
+      val loopA = _abLoopState.value.a
+      val loopB = _abLoopState.value.b
+      if (loopA != null && loopB != null) {
+        val min = minOf(loopA.toInt(), loopB.toInt())
+        val max = maxOf(loopA.toInt(), loopB.toInt())
+        clampedPosition = clampedPosition.coerceIn(min, max)
+      }
+
+      if (clampedPosition !in 0..maxDuration) return@launch
+
+      // Cancel pending relative seek before absolute seek
+      seekCoalesceJob?.cancel()
+      pendingSeekOffset = 0
+
+      // Use precise seeking for videos shorter than 2 minutes (120 seconds) or if preference is enabled
+      // If fast is true, override and use keyframe seeking for speed
+      val seekMode = if (fast) {
+        "absolute+keyframes"
+      } else {
+        val shouldUsePreciseSeeking = playerPreferences.usePreciseSeeking.get() || maxDuration < 120
+        if (shouldUsePreciseSeeking) "absolute+exact" else "absolute+keyframes"
+      }
+      MPVLib.command("seek", clampedPosition.toString(), seekMode)
+    }
+  }
+
+  private fun coalesceSeek(offset: Int) {
+    pendingSeekOffset += offset
+    seekCoalesceJob?.cancel()
+    seekCoalesceJob =
+      viewModelScope.launch(Dispatchers.IO) {
+        delay(SEEK_COALESCE_DELAY_MS)
+        val toApply = pendingSeekOffset
+        pendingSeekOffset = 0
+
+        if (toApply != 0) {
+          val duration = MPVLib.getPropertyInt("duration") ?: 0
+          val currentPos = MPVLib.getPropertyInt("time-pos") ?: 0
+
+          if (duration > 0 && currentPos + toApply >= duration) {
+              // If seeking past the end, force seek to 100% absolute to ensure EOF is triggered
+              MPVLib.command("seek", "100", "absolute-percent+exact")
+          } else {
+              // Use precise seeking for videos shorter than 2 minutes (120 seconds) or if preference is enabled
+              val shouldUsePreciseSeeking = playerPreferences.usePreciseSeeking.get() || duration < 120
+              val seekMode = if (shouldUsePreciseSeeking) "relative+exact" else "relative+keyframes"
+              MPVLib.command("seek", toApply.toString(), seekMode)
+          }
+        }
+      }
+  }
+
+  fun leftSeek() {
+    _seekState.update { s ->
+      s.copy(amount = if ((pos ?: 0) > 0) s.amount - doubleTapToSeekDuration else s.amount, isForwards = false)
+    }
+    seekBy(-doubleTapToSeekDuration)
+  }
+
+  fun rightSeek() {
+    _seekState.update { s ->
+      s.copy(amount = if ((pos ?: 0) < (duration ?: 0)) s.amount + doubleTapToSeekDuration else s.amount, isForwards = true)
+    }
+    seekBy(doubleTapToSeekDuration)
+  }
+
+  fun updateSeekAmount(amount: Int) {
+    _seekState.update { it.copy(amount = amount) }
+  }
+
+  fun updateSeekText(text: String?) {
+    _seekState.update { it.copy(text = text) }
+  }
+
+  fun updateIsSeekingForwards(isForwards: Boolean) {
+    _seekState.update { it.copy(isForwards = isForwards) }
+  }
+
+  private fun seekToWithText(
+    seekValue: Int,
+    text: String?,
+  ) {
+    val currentPos = pos ?: return
+    _seekState.value = SeekState(text = text, amount = seekValue - currentPos, isForwards = seekValue > currentPos)
+    seekTo(seekValue)
+  }
+
+  private fun seekByWithText(
+    value: Int,
+    text: String?,
+  ) {
+    val currentPos = pos ?: return
+    val maxDuration = duration ?: return
+
+    _seekState.update { s ->
+      val newAmount = if ((value < 0 && s.amount < 0) || currentPos + value > maxDuration) 0 else s.amount + value
+      SeekState(text = text, amount = newAmount, isForwards = value > 0)
+    }
+    seekBy(value)
+  }
+
+  // ==================== Brightness & Volume ====================
+
+  fun changeBrightnessTo(brightness: Float) {
+    val coercedBrightness = brightness.coerceIn(-0.75f, 1f)
+    host.hostWindow.attributes =
+      host.hostWindow.attributes.apply {
+        screenBrightness = coercedBrightness.coerceIn(0f, 1f)
+      }
+    currentBrightness.value = coercedBrightness
+
+    // Save brightness to preferences if enabled
+    if (playerPreferences.rememberBrightness.get()) {
+      playerPreferences.defaultBrightness.set(coercedBrightness)
+    }
+  }
+
+  fun displayBrightnessSlider() {
+    isBrightnessSliderShown.value = true
+    brightnessSliderTimestamp.value = System.currentTimeMillis()
+  }
+
+  fun changeVolumeBy(change: Int) {
+    val currentSystemVolume = syncCurrentSystemVolume()
+    val mpvVolume = MPVLib.getPropertyInt("volume") ?: 100
+    val absoluteMaxVolume = volumeBoostCap ?: (audioPreferences.volumeBoostCap.get() + 100)
+
+    if (currentSystemVolume < maxVolume && mpvVolume > 100) {
+      changeMPVVolumeTo(100)
+    }
+
+    if (absoluteMaxVolume > 100 && currentSystemVolume == maxVolume) {
+      if (mpvVolume == 100 && change < 0) {
+        changeVolumeTo(currentSystemVolume + change)
+      }
+      val finalMPVVolume = (mpvVolume + change).coerceAtLeast(100)
+      if (finalMPVVolume in 100..absoluteMaxVolume) {
+        return changeMPVVolumeTo(finalMPVVolume)
+      }
+    }
+
+    changeVolumeTo(currentSystemVolume + change)
+  }
+
+  fun changeVolumePercentTo(volumePercent: Int) {
+    val newPercent = volumePercent.coerceIn(0, 100)
+    val newVolume = percentToSystemVolume(newPercent)
+    host.audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newVolume, 0)
+    currentVolume.value = syncCurrentSystemVolume()
+    currentVolumePercent.value = newPercent
+
+    if (currentVolume.value < maxVolume) {
+      val currentMpvVolume = MPVLib.getPropertyInt("volume") ?: 100
+      if (currentMpvVolume > 100) {
+        changeMPVVolumeTo(100)
+      }
+    }
+  }
+
+  fun changeVolumeTo(volume: Int) {
+    val newVolume = volume.coerceIn(0..maxVolume)
+    host.audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newVolume, 0)
+    currentVolume.value = syncCurrentSystemVolume()
+
+    if (currentVolume.value < maxVolume) {
+      val currentMpvVolume = MPVLib.getPropertyInt("volume") ?: 100
+      if (currentMpvVolume > 100) {
+        changeMPVVolumeTo(100)
+      }
+    }
+  }
+
+  fun changeMPVVolumeTo(volume: Int) {
+    val current = MPVLib.getPropertyInt("volume") ?: 100
+    if (current == volume) return
+    MPVLib.setPropertyInt("volume", volume)
+  }
+
+  fun displayVolumeSlider() {
+    isVolumeSliderShown.value = true
+    volumeSliderTimestamp.value = System.currentTimeMillis()
+  }
+
+  fun changeSubtitlePositionTo(position: Int) {
+    val newPosition = clampSubtitlePosition(position)
+    subtitlesPreferences.subPos.set(newPosition)
+    syncSubtitleLayout(newPosition)
+    playerUpdate.value = PlayerUpdates.ShowText("Subtitle Position: $newPosition")
+  }
+
+  private fun syncSubtitleLayout(primaryPosition: Int = subtitlesPreferences.subPos.get()) {
+    applySubtitleLayout(primaryPosition, subtitlesPreferences.overrideAssSubs.get())
+  }
+
+  private fun syncCurrentSystemVolume(): Int {
+    val systemVolume = host.audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+    currentVolume.value = systemVolume
+    currentVolumePercent.value = systemVolumeToPercent(systemVolume)
+    return systemVolume
+  }
+
+  fun syncCurrentVolumeState() {
+    syncCurrentSystemVolume()
+  }
+
+  private fun systemVolumeToPercent(systemVolume: Int): Int {
+    if (maxVolume <= 0) return 0
+    return ((systemVolume.toFloat() / maxVolume.toFloat()) * 100f).roundToInt().coerceIn(0, 100)
+  }
+
+  private fun percentToSystemVolume(volumePercent: Int): Int {
+    if (maxVolume <= 0) return 0
+    return ((volumePercent / 100f) * maxVolume.toFloat()).roundToInt().coerceIn(0, maxVolume)
+  }
+
+  // ==================== Video Aspect ====================
+
+  fun changeVideoAspect(
+    aspect: VideoAspect,
+    showUpdate: Boolean = true,
+  ) {
+    when (aspect) {
+      VideoAspect.Fit -> {
+        // To FIT: Reset both properties to their defaults.
+        MPVLib.setPropertyDouble("panscan", 0.0)
+        MPVLib.setPropertyString("video-aspect-override", "no")
+      }
+      VideoAspect.Crop -> {
+        // To CROP: Reset aspect override first, then set panscan
+        MPVLib.setPropertyString("video-aspect-override", "no")
+        MPVLib.setPropertyDouble("panscan", 1.0)
+      }
+      VideoAspect.Stretch -> {
+        // To STRETCH: Calculate screen ratio accounting for video rotation
+        @Suppress("DEPRECATION")
+        val dm = DisplayMetrics()
+        @Suppress("DEPRECATION")
+        host.hostWindowManager.defaultDisplay.getRealMetrics(dm)
+
+        // Get video rotation from metadata
+        val rotate = MPVLib.getPropertyInt("video-params/rotate") ?: 0
+        val isVideoRotated = (rotate % 180 == 90) // 90° or 270° rotation
+
+        // Calculate screen ratio, inverting if video is rotated
+        val screenRatio = if (isVideoRotated) {
+          // Video is rotated, so invert the screen ratio
+          dm.heightPixels.toDouble() / dm.widthPixels.toDouble()
+        } else {
+          // Video is not rotated, use normal screen ratio
+          dm.widthPixels.toDouble() / dm.heightPixels.toDouble()
+        }
+
+        // Set aspect override first, then reset panscan
+        // This prevents the brief flash of Fit mode
+        MPVLib.setPropertyDouble("video-aspect-override", screenRatio)
+        MPVLib.setPropertyDouble("panscan", 0.0)
+      }
+    }
+
+    // Update the state
+    playerPreferences.lastVideoAspect.set(aspect)
+    playerPreferences.lastCustomAspectRatio.set(-1f)
+    _videoAspect.value = aspect
+    _currentAspectRatio.value = -1.0 // Reset custom ratio when using standard modes
+
+    // Notify the UI
+    if (showUpdate) {
+      playerUpdate.value = PlayerUpdates.AspectRatio
+    }
+  }
+
+  fun setCustomAspectRatio(
+    ratio: Double,
+    showUpdate: Boolean = true,
+  ) {
+    MPVLib.setPropertyDouble("panscan", 0.0)
+    MPVLib.setPropertyDouble("video-aspect-override", ratio)
+    playerPreferences.lastCustomAspectRatio.set(ratio.toFloat())
+    _currentAspectRatio.value = ratio
+    if (showUpdate) {
+      playerUpdate.value = PlayerUpdates.AspectRatio
+    }
+  }
+
+  fun restoreSavedVideoAspect(showUpdate: Boolean = false) {
+    val customAspectRatio = playerPreferences.lastCustomAspectRatio.get()
+    if (customAspectRatio > 0f) {
+      setCustomAspectRatio(customAspectRatio.toDouble(), showUpdate)
+      return
+    }
+
+    changeVideoAspect(playerPreferences.lastVideoAspect.get(), showUpdate)
+  }
+
+  // ==================== Screen Rotation ====================
+
+  fun cycleScreenRotations() {
+    if (isAudioOnly.value) {
+      host.hostRequestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+      return
+    }
+    // Temporarily cycle orientation WITHOUT modifying preferences
+    // Preferences remain the single source of truth and will be reapplied on next video
+    host.hostRequestedOrientation =
+      when (host.hostRequestedOrientation) {
+        ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE,
+        ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE,
+        ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE,
+        -> {
+          ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+        }
+        else -> {
+          ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        }
+      }
+  }
+
+  // ==================== Lua Invocation Handling ====================
+
+  fun handleLuaInvocation(
+    property: String,
+    value: String,
+  ) {
+    val data = value.removeSurrounding("\"").ifEmpty { return }
+
+    when (property.substringAfterLast("/")) {
+      "show_text" -> playerUpdate.value = PlayerUpdates.ShowText(data)
+      "toggle_ui" -> handleToggleUI(data)
+      "show_panel" -> handleShowPanel(data)
+      "seek_to_with_text" -> {
+        val (seekValue, text) = data.split("|", limit = 2)
+        seekToWithText(seekValue.toInt(), text)
+      }
+      "seek_by_with_text" -> {
+        val (seekValue, text) = data.split("|", limit = 2)
+        seekByWithText(seekValue.toInt(), text)
+      }
+      "seek_by" -> seekByWithText(data.toInt(), null)
+      "seek_to" -> seekToWithText(data.toInt(), null)
+      "software_keyboard" -> handleSoftwareKeyboard(data)
+      // Curl bridge: dispatch the HTTP request asynchronously; response is written
+      // back to user-data/zeroxpv/curl_response for the script to observe.
+      "curl_request" -> scriptCurlBridge.handleRequest(data)
+    }
+
+    // Do not clear curl_request or curl_response here:
+    //  - curl_request is consumed asynchronously by the bridge.
+    //  - curl_response is written by the bridge and must remain readable
+    //    until the script's observe_property callback fires.
+    if (property.substringAfterLast("/") !in listOf("curl_request", "curl_response")) {
+      MPVLib.setPropertyString(property, "")
+    }
+  }
+
+  private fun handleToggleUI(data: String) {
+    when (data) {
+      "show" -> showControls()
+      "toggle" -> if (controlsShown.value) hideControls() else showControls()
+      "hide" -> {
+        sheetShown.value = Sheets.None
+        panelShown.value = Panels.None
+        hideControls()
+      }
+    }
+  }
+
+  private fun handleShowPanel(data: String) {
+    when (data) {
+      "frame_navigation" -> {
+        sheetShown.value = Sheets.FrameNavigation
+      }
+      else -> {
+        panelShown.value =
+          when (data) {
+            "subtitle_settings" -> Panels.SubtitleSettings
+            "subtitle_delay" -> Panels.SubtitleDelay
+            "audio_delay" -> Panels.AudioDelay
+            "video_filters" -> Panels.VideoFilters
+            "lua_scripts" -> Panels.LuaScripts
+            "hdr_screen_output" -> Panels.HdrScreenOutput
+            else -> Panels.None
+          }
+      }
+    }
+  }
+
+  private fun handleSoftwareKeyboard(data: String) {
+    when (data) {
+      "show" -> forceShowSoftwareKeyboard()
+      "hide" -> forceHideSoftwareKeyboard()
+      "toggle" ->
+        if (!inputMethodManager.isActive) {
+          forceShowSoftwareKeyboard()
+        } else {
+          forceHideSoftwareKeyboard()
+        }
+    }
+  }
+
+  @Suppress("DEPRECATION")
+  private fun forceShowSoftwareKeyboard() {
+    inputMethodManager.toggleSoftInput(InputMethodManager.SHOW_FORCED, 0)
+  }
+
+  @Suppress("DEPRECATION")
+  private fun forceHideSoftwareKeyboard() {
+    inputMethodManager.toggleSoftInput(InputMethodManager.SHOW_IMPLICIT, 0)
+  }
+
+  // ==================== Gesture Handling ====================
+
+  fun handleLeftDoubleTap() {
+    when (gesturePreferences.leftSingleActionGesture.get()) {
+      SingleActionGesture.Seek -> leftSeek()
+      SingleActionGesture.PlayPause -> pauseUnpause()
+      SingleActionGesture.Custom -> viewModelScope.launch(Dispatchers.IO) {
+        MPVLib.command("keypress", CustomKeyCodes.DoubleTapLeft.keyCode)
+      }
+      SingleActionGesture.None -> {}
+    }
+  }
+
+  fun handleCenterDoubleTap() {
+    when (gesturePreferences.centerSingleActionGesture.get()) {
+      SingleActionGesture.PlayPause -> pauseUnpause()
+      SingleActionGesture.Custom -> viewModelScope.launch(Dispatchers.IO) {
+        MPVLib.command("keypress", CustomKeyCodes.DoubleTapCenter.keyCode)
+      }
+      SingleActionGesture.Seek, SingleActionGesture.None -> {}
+    }
+  }
+
+  fun handleCenterSingleTap() {
+    when (gesturePreferences.centerSingleActionGesture.get()) {
+      SingleActionGesture.PlayPause -> pauseUnpause()
+      SingleActionGesture.Custom -> viewModelScope.launch(Dispatchers.IO) {
+        MPVLib.command("keypress", CustomKeyCodes.DoubleTapCenter.keyCode)
+      }
+      SingleActionGesture.Seek, SingleActionGesture.None -> {}
+    }
+  }
+
+  fun handleRightDoubleTap() {
+    when (gesturePreferences.rightSingleActionGesture.get()) {
+      SingleActionGesture.Seek -> rightSeek()
+      SingleActionGesture.PlayPause -> pauseUnpause()
+      SingleActionGesture.Custom -> viewModelScope.launch(Dispatchers.IO) {
+        MPVLib.command("keypress", CustomKeyCodes.DoubleTapRight.keyCode)
+      }
+      SingleActionGesture.None -> {}
+    }
+  }
+
+  // ==================== Video Zoom ====================
+
+  fun setVideoZoom(zoom: Float) {
+    _videoZoom.value = zoom
+    MPVLib.setPropertyDouble("video-zoom", zoom.toDouble())
+  }
+
+  // Video pan (for pan & zoom feature)
+  private val _videoPanX = MutableStateFlow(0f)
+  val videoPanX: StateFlow<Float> = _videoPanX.asStateFlow()
+
+  private val _videoPanY = MutableStateFlow(0f)
+  val videoPanY: StateFlow<Float> = _videoPanY.asStateFlow()
+
+  fun setVideoPan(x: Float, y: Float) {
+    _videoPanX.value = x
+    _videoPanY.value = y
+    MPVLib.setPropertyDouble("video-pan-x", x.toDouble())
+    MPVLib.setPropertyDouble("video-pan-y", y.toDouble())
+  }
+
+  fun resetVideoPan() {
+    setVideoPan(0f, 0f)
+  }
+
+  fun resetVideoZoom() {
+    setVideoZoom(0f)
+  }
+
+  // ==================== Frame Navigation ====================
+
+  fun updateFrameInfo() {
+    _currentFrame.value = MPVLib.getPropertyInt("estimated-frame-number") ?: 0
+
+    val durationValue = MPVLib.getPropertyDouble("duration") ?: 0.0
+    val fps =
+      MPVLib.getPropertyDouble("container-fps")
+        ?: MPVLib.getPropertyDouble("estimated-vf-fps")
+        ?: 0.0
+
+    _totalFrames.value =
+      if (durationValue > 0 && fps > 0) {
+        (durationValue * fps).toInt()
+      } else {
+        0
+      }
+  }
+
+  fun toggleFrameNavigationExpanded() {
+    val wasExpanded = _isFrameNavigationExpanded.value
+    _isFrameNavigationExpanded.update { !it }
+    // Update frame info and pause when expanding (going from false to true)
+    if (!wasExpanded) {
+      // Pause the video if it's playing
+      if (paused != true) {
+        pauseUnpause()
+      }
+      updateFrameInfo()
+      showFrameInfoOverlay()
+      resetFrameNavigationTimer()
+    } else {
+      // Cancel timer when manually collapsing
+      frameNavigationCollapseJob?.cancel()
+    }
+  }
+
+  private fun showFrameInfoOverlay() {
+    playerUpdate.value = PlayerUpdates.FrameInfo(_currentFrame.value, _totalFrames.value)
+  }
+
+  fun frameStepForward() {
+    viewModelScope.launch(Dispatchers.IO) {
+      if (paused != true) {
+        pauseUnpause()
+        delay(50)
+      }
+      MPVLib.command("no-osd", "frame-step")
+      delay(100)
+      updateFrameInfo()
+      withContext(Dispatchers.Main) {
+        showFrameInfoOverlay()
+        // Reset the inactivity timer
+        resetFrameNavigationTimer()
+      }
+    }
+  }
+
+  fun frameStepBackward() {
+    viewModelScope.launch(Dispatchers.IO) {
+      if (paused != true) {
+        pauseUnpause()
+        delay(50)
+      }
+      MPVLib.command("no-osd", "frame-back-step")
+      delay(100)
+      updateFrameInfo()
+      withContext(Dispatchers.Main) {
+        showFrameInfoOverlay()
+        // Reset the inactivity timer
+        resetFrameNavigationTimer()
+      }
+    }
+  }
+
+  private var frameNavigationCollapseJob: Job? = null
+
+  fun resetFrameNavigationTimer() {
+    frameNavigationCollapseJob?.cancel()
+    frameNavigationCollapseJob = viewModelScope.launch {
+      delay(10000) // 10 seconds
+      if (_isFrameNavigationExpanded.value) {
+        _isFrameNavigationExpanded.value = false
+      }
+    }
+  }
+
+  fun takeSnapshot(context: Context) {
+    viewModelScope.launch(Dispatchers.IO) {
+      _isSnapshotLoading.value = true
+      try {
+        val includeSubtitles = playerPreferences.includeSubtitlesInSnapshot.get()
+        ScreenshotSaver.save(
+          context = context,
+          settings = ScreenshotSettings.fromPreferences(playerPreferences),
+          includeSubtitles = includeSubtitles,
+        ).getOrThrow()
+        withContext(Dispatchers.Main) {
+          Toast
+            .makeText(
+              context,
+              context.getString(R.string.player_sheets_frame_navigation_snapshot_saved),
+              Toast.LENGTH_SHORT,
+            ).show()
+        }
+      } catch (e: Exception) {
+        withContext(Dispatchers.Main) {
+          Toast.makeText(context, "Failed to save snapshot: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+      } finally {
+        _isSnapshotLoading.value = false
+      }
+    }
+  }
+
+  // ==================== Playlist Management ====================
+
+  fun hasPlaylistSupport(): Boolean {
+    val playlistModeEnabled = playerPreferences.playlistMode.get()
+    return playlistModeEnabled && ((host as? PlayerActivity)?.playlist?.isNotEmpty() ?: false)
+  }
+
+  fun getPlaylistInfo(): String? {
+    val activity = host as? PlayerActivity ?: return null
+    if (activity.playlist.isEmpty()) return null
+
+    val totalCount = getPlaylistTotalCount()
+    return "${activity.playlistIndex + 1}/$totalCount"
+  }
+
+  fun isPlaylistM3U(): Boolean {
+    val activity = host as? PlayerActivity ?: return false
+    return activity.isCurrentPlaylistM3U()
+  }
+
+  fun getPlaylistTotalCount(): Int {
+    val activity = host as? PlayerActivity ?: return 0
+    return activity.playlist.size
+  }
+
+  fun getPlaylistData(): List<io.alwayszihan.zeroxpv.ui.player.controls.components.sheets.PlaylistItem>? {
+    val activity = host as? PlayerActivity ?: return null
+    if (activity.playlist.isEmpty()) return null
+
+    // Get current video progress
+    val currentPos = pos ?: 0
+    val currentDuration = duration ?: 0
+    val currentProgress = if (currentDuration > 0) {
+      ((currentPos.toFloat() / currentDuration.toFloat()) * 100f).coerceIn(0f, 100f)
+    } else 0f
+
+    return activity.playlist.mapIndexed { index, uri ->
+      val title = activity.getPlaylistItemTitle(uri)
+      val resolvedUri = if (uri.scheme == "content") {
+        uri.extractLocalPath()?.let { Uri.fromFile(File(it)) } ?: uri
+      } else {
+        uri
+      }
+      val path = resolvedUri.toString()
+      val isCurrentlyPlaying = index == activity.playlistIndex
+
+      // Try to get from cache first (synchronized access)
+      val cacheKey = resolvedUri.toString()
+      val (durationStr, resolutionStr) = synchronized(metadataCache) { metadataCache[cacheKey] } ?: ("" to "")
+
+      io.alwayszihan.zeroxpv.ui.player.controls.components.sheets.PlaylistItem(
+        uri = resolvedUri,
+        title = title,
+        index = index,
+        isPlaying = isCurrentlyPlaying,
+        path = path,
+        progressPercent = if (isCurrentlyPlaying) currentProgress else 0f,
+        isWatched = isCurrentlyPlaying && currentProgress >= 95f,
+        duration = durationStr,
+        resolution = resolutionStr,
+      )
+    }
+  }
+
+  private fun getVideoMetadata(uri: Uri): Pair<String, String> {
+    val resolvedUri = if (uri.scheme == "content") {
+      uri.extractLocalPath()?.let { Uri.fromFile(File(it)) } ?: uri
+    } else {
+      uri
+    }
+
+    // Skip metadata extraction for network streams and M3U playlists
+    if (resolvedUri.scheme?.startsWith("http") == true || resolvedUri.scheme == "rtmp" || resolvedUri.scheme == "ftp" || resolvedUri.scheme == "rtsp" || resolvedUri.scheme == "mms") {
+      return "" to ""
+    }
+
+    // Skip M3U/M3U8 files
+    val uriString = resolvedUri.toString().lowercase()
+    if (uriString.contains(".m3u8") || uriString.contains(".m3u")) {
+      return "" to ""
+    }
+
+    // Try MediaStore first (much faster - uses cached values)
+    val mediaStoreMetadata = getVideoMetadataFromMediaStore(resolvedUri)
+    if (mediaStoreMetadata != null) {
+      return mediaStoreMetadata
+    }
+
+    // Fallback to MediaMetadataRetriever only if MediaStore fails
+    val retriever = android.media.MediaMetadataRetriever()
+    return try {
+      // For file:// URIs, use the path directly (faster)
+      if (resolvedUri.scheme == "file") {
+        retriever.setDataSource(resolvedUri.path)
+      } else {
+        // For content:// URIs, use context
+        retriever.setDataSource(host.context, resolvedUri)
+      }
+
+      // Get duration
+      val durationMs = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
+      val durationStr = if (durationMs != null) {
+        formatDuration(durationMs.toLong())
+      } else ""
+
+      // Get resolution
+      val width = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+      val height = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+      val resolutionStr = if (width != null && height != null) {
+        "${width}x${height}"
+      } else ""
+
+      durationStr to resolutionStr
+    } catch (e: Exception) {
+      android.util.Log.e("PlayerViewModel", "Failed to get video metadata for $resolvedUri", e)
+      "" to ""
+    } finally {
+      try {
+        retriever.release()
+      } catch (e: Exception) {
+        // Ignore release errors
+      }
+    }
+  }
+
+  /**
+   * Get video metadata from MediaStore (fast - uses cached system values).
+   * Returns null if the video is not found in MediaStore.
+   */
+  private fun getVideoMetadataFromMediaStore(uri: Uri): Pair<String, String>? {
+    return try {
+      val projection = arrayOf(
+        android.provider.MediaStore.Video.Media.DURATION,
+        android.provider.MediaStore.Video.Media.WIDTH,
+        android.provider.MediaStore.Video.Media.HEIGHT,
+        android.provider.MediaStore.Video.Media.DATA
+      )
+
+      // Determine the query URI based on the input URI scheme
+      val queryUri = when (uri.scheme) {
+        "content" -> {
+          // If it's already a content URI, use it directly
+          if (uri.toString().startsWith(android.provider.MediaStore.Video.Media.EXTERNAL_CONTENT_URI.toString())) {
+            uri
+          } else {
+            // Try to find by path if available
+            null
+          }
+        }
+        "file" -> {
+          // For file:// URIs, query by path
+          null
+        }
+        else -> null
+      }
+
+      // Query by URI if we have a content URI
+      if (queryUri != null) {
+        host.context.contentResolver.query(
+          queryUri,
+          projection,
+          null,
+          null,
+          null
+        )?.use { cursor ->
+          if (cursor.moveToFirst()) {
+            val durationColumn = cursor.getColumnIndex(android.provider.MediaStore.Video.Media.DURATION)
+            val widthColumn = cursor.getColumnIndex(android.provider.MediaStore.Video.Media.WIDTH)
+            val heightColumn = cursor.getColumnIndex(android.provider.MediaStore.Video.Media.HEIGHT)
+
+            val durationMs = if (durationColumn >= 0) cursor.getLong(durationColumn) else 0L
+            val width = if (widthColumn >= 0) cursor.getInt(widthColumn) else 0
+            val height = if (heightColumn >= 0) cursor.getInt(heightColumn) else 0
+
+            val durationStr = formatDuration(durationMs)
+
+            val resolutionStr = if (width > 0 && height > 0) {
+              "${width}x${height}"
+            } else ""
+
+            return durationStr to resolutionStr
+          }
+        }
+      }
+
+      // Query by file path if we have a file:// URI or content URI without direct match
+      val filePath = when (uri.scheme) {
+        "file" -> uri.path
+        "content" -> {
+          // Try to get the file path from content URI
+          host.context.contentResolver.query(
+            uri,
+            arrayOf(android.provider.MediaStore.Video.Media.DATA),
+            null,
+            null,
+            null
+          )?.use { cursor ->
+            if (cursor.moveToFirst()) {
+              val dataColumn = cursor.getColumnIndex(android.provider.MediaStore.Video.Media.DATA)
+              if (dataColumn >= 0) cursor.getString(dataColumn) else null
+            } else null
+          }
+        }
+        else -> null
+      }
+
+      if (filePath != null) {
+        val selection = "${android.provider.MediaStore.Video.Media.DATA} = ?"
+        val selectionArgs = arrayOf(filePath)
+
+        host.context.contentResolver.query(
+          android.provider.MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+          projection,
+          selection,
+          selectionArgs,
+          null
+        )?.use { cursor ->
+          if (cursor.moveToFirst()) {
+            val durationColumn = cursor.getColumnIndex(android.provider.MediaStore.Video.Media.DURATION)
+            val widthColumn = cursor.getColumnIndex(android.provider.MediaStore.Video.Media.WIDTH)
+            val heightColumn = cursor.getColumnIndex(android.provider.MediaStore.Video.Media.HEIGHT)
+
+            val durationMs = if (durationColumn >= 0) cursor.getLong(durationColumn) else 0L
+            val width = if (widthColumn >= 0) cursor.getInt(widthColumn) else 0
+            val height = if (heightColumn >= 0) cursor.getInt(heightColumn) else 0
+
+            val durationStr = formatDuration(durationMs)
+
+            val resolutionStr = if (width > 0 && height > 0) {
+              "${width}x${height}"
+            } else ""
+
+            return durationStr to resolutionStr
+          }
+        }
+      }
+
+      null
+    } catch (e: Exception) {
+      android.util.Log.w("PlayerViewModel", "Failed to get metadata from MediaStore for $uri, will try MediaMetadataRetriever", e)
+      null
+    }
+  }
+
+  /**
+   * Format duration in milliseconds to hh:mm:ss or mm:ss format
+   */
+  private fun formatDuration(durationMs: Long): String {
+    if (durationMs <= 0) return ""
+
+    val totalSeconds = durationMs / 1000
+    val hours = totalSeconds / 3600
+    val minutes = (totalSeconds % 3600) / 60
+    val seconds = totalSeconds % 60
+
+    return if (hours > 0) {
+      String.format("%d:%02d:%02d", hours, minutes, seconds)
+    } else {
+      String.format("%d:%02d", minutes, seconds)
+    }
+  }
+
+
+
+  fun playPlaylistItem(index: Int) {
+    val activity = host as? PlayerActivity ?: return
+    activity.playPlaylistItem(index)
+  }
+
+  /**
+   * Refreshes the playlist items to update the currently playing indicator.
+   * Called when a new video starts playing to update the playlist UI.
+   */
+  fun refreshPlaylistItems(forceMetadata: Boolean = sheetShown.value == Sheets.Playlist) {
+    viewModelScope.launch(Dispatchers.IO) {
+      val updatedItems = getPlaylistData()
+      if (updatedItems != null) {
+        // Clear cache if playlist size changed
+        if (_playlistItems.value.size != updatedItems.size) {
+          metadataCache.evictAll()
+        }
+
+        _playlistItems.value = updatedItems
+
+        if (forceMetadata) {
+          // Load metadata only when the playlist sheet is actually in use.
+          loadPlaylistMetadataAsync(updatedItems)
+        }
+      }
+    }
+  }
+
+  /**
+   * Loads metadata for all playlist items asynchronously in the background.
+   * Updates the playlist items as metadata becomes available.
+   * Uses batched updates to avoid O(n²) complexity with large playlists.
+   * Skips metadata extraction for M3U playlists (network streams).
+   */
+  private fun loadPlaylistMetadataAsync(items: List<io.alwayszihan.zeroxpv.ui.player.controls.components.sheets.PlaylistItem>) {
+    playlistMetadataJob?.cancel()
+    playlistMetadataJob = viewModelScope.launch(Dispatchers.IO) {
+      // Skip metadata extraction for M3U playlists only if they contain network streams
+      val activity = host as? PlayerActivity
+      if (activity?.isCurrentPlaylistM3U() == true) {
+        val hasNetworkStreams = activity.playlist.any { uri ->
+          val scheme = uri.scheme?.lowercase()
+          scheme == "http" || scheme == "https" || scheme == "davs" || scheme == "smb" || scheme == "ftp" || scheme == "sftp"
+        }
+        if (hasNetworkStreams) {
+          Log.d(TAG, "Skipping metadata extraction for M3U playlist with network streams")
+          return@launch
+        }
+      }
+
+      val metadataItems =
+        activity?.let { currentActivity ->
+          if (items.size <= PLAYLIST_METADATA_PREFETCH_LIMIT) {
+            items
+          } else {
+            val currentIndex = currentActivity.playlistIndex.coerceIn(0, items.lastIndex)
+            val startIndex = maxOf(0, currentIndex - PLAYLIST_METADATA_PREFETCH_RADIUS)
+            val endIndex = minOf(items.lastIndex, currentIndex + PLAYLIST_METADATA_PREFETCH_RADIUS)
+            items.subList(startIndex, endIndex + 1)
+          }
+        } ?: items
+
+      // Limit concurrent metadata extraction to avoid overwhelming resources
+      val batchSize = 5
+      metadataItems.chunked(batchSize).forEach { batch ->
+        val updates = mutableMapOf<String, Pair<String, String>>()
+
+        // Extract metadata for the batch
+        batch.forEach { item ->
+          val cacheKey = item.uri.toString()
+
+          // Skip if already in cache (LruCache is thread-safe)
+          if (metadataCache.get(cacheKey) == null) {
+            // Extract metadata
+            val (durationStr, resolutionStr) = getVideoMetadata(item.uri)
+
+            // Update cache and track update
+            updateMetadataCache(cacheKey, durationStr to resolutionStr)
+            updates[cacheKey] = durationStr to resolutionStr
+          }
+        }
+
+        // Apply all batched updates at once (single playlist update)
+        if (updates.isNotEmpty()) {
+          _playlistItems.value = _playlistItems.value.map { currentItem ->
+            val cacheKey = currentItem.uri.toString()
+            val (durationStr, resolutionStr) = updates[cacheKey] ?: return@map currentItem
+            currentItem.copy(duration = durationStr, resolution = resolutionStr)
+          }
+        }
+      }
+    }
+  }
+
+  fun hasNext(): Boolean = (host as? PlayerActivity)?.hasNext() ?: false
+
+  fun hasPrevious(): Boolean = (host as? PlayerActivity)?.hasPrevious() ?: false
+
+  fun playNext() {
+    (host as? PlayerActivity)?.playNext()
+  }
+
+  fun playPrevious() {
+    (host as? PlayerActivity)?.playPrevious()
+  }
+
+  // ==================== Repeat and Shuffle ====================
+
+  fun applyPersistedShuffleState() {
+    if (_shuffleEnabled.value) {
+      val activity = host as? PlayerActivity
+      activity?.onShuffleToggled(true)
+    }
+  }
+
+  fun cycleRepeatMode() {
+    val hasPlaylist = (host as? PlayerActivity)?.playlist?.isNotEmpty() == true
+
+    _repeatMode.value = when (_repeatMode.value) {
+      RepeatMode.OFF -> RepeatMode.ONE
+      RepeatMode.ONE -> if (hasPlaylist) RepeatMode.ALL else RepeatMode.OFF
+      RepeatMode.ALL -> RepeatMode.OFF
+    }
+
+    // Persist the repeat mode
+    playerPreferences.repeatMode.set(_repeatMode.value)
+
+    // Show overlay update instead of toast
+    playerUpdate.value = PlayerUpdates.RepeatMode(_repeatMode.value)
+  }
+
+  fun toggleShuffle() {
+    _shuffleEnabled.value = !_shuffleEnabled.value
+    val activity = host as? PlayerActivity
+
+    // Persist the shuffle state
+    playerPreferences.shuffleEnabled.set(_shuffleEnabled.value)
+
+    // Notify activity to handle shuffle state change
+    activity?.onShuffleToggled(_shuffleEnabled.value)
+
+    // Show overlay update instead of toast
+    playerUpdate.value = PlayerUpdates.Shuffle(_shuffleEnabled.value)
+  }
+
+  fun shouldRepeatCurrentFile(): Boolean {
+    return _repeatMode.value == RepeatMode.ONE ||
+      (_repeatMode.value == RepeatMode.ALL && (host as? PlayerActivity)?.playlist?.isEmpty() == true)
+  }
+
+  fun shouldRepeatPlaylist(): Boolean {
+    return _repeatMode.value == RepeatMode.ALL && (host as? PlayerActivity)?.playlist?.isNotEmpty() == true
+  }
+
+  // ==================== A-B Loop ====================
+
+  fun toggleABLoopExpanded() {
+    _abLoopState.update { it.copy(isExpanded = !it.isExpanded) }
+  }
+
+  fun setLoopA() {
+    if (_abLoopState.value.a != null) {
+      _abLoopState.update { it.copy(a = null) }
+      MPVLib.setPropertyString("ab-loop-a", "no")
+      return
+    }
+    val currentPos = MPVLib.getPropertyDouble("time-pos") ?: return
+    _abLoopState.update { it.copy(a = currentPos) }
+    MPVLib.setPropertyDouble("ab-loop-a", currentPos)
+  }
+
+  fun setLoopB() {
+    if (_abLoopState.value.b != null) {
+      _abLoopState.update { it.copy(b = null) }
+      MPVLib.setPropertyString("ab-loop-b", "no")
+      return
+    }
+    val currentPos = MPVLib.getPropertyDouble("time-pos") ?: return
+    _abLoopState.update { it.copy(b = currentPos) }
+    MPVLib.setPropertyDouble("ab-loop-b", currentPos)
+  }
+
+  fun clearABLoop() {
+    _abLoopState.update { it.copy(a = null, b = null) }
+    MPVLib.setPropertyString("ab-loop-a", "no")
+    MPVLib.setPropertyString("ab-loop-b", "no")
+  }
+
+  fun formatTimestamp(seconds: Double): String {
+    val totalSec = seconds.toInt()
+    val h = totalSec / 3600
+    val m = (totalSec % 3600) / 60
+    val s = totalSec % 60
+    return if (h > 0) String.format("%d:%02d:%02d", h, m, s) else String.format("%02d:%02d", m, s)
+  }
+
+  // ==================== Mirroring ====================
+
+  fun toggleMirroring() {
+    val newMirrorState = !_transformState.value.isMirrored
+    _transformState.update { it.copy(isMirrored = newMirrorState) }
+
+    // Use labeled video filter for mirroring to avoid state desync
+    if (newMirrorState) {
+      MPVLib.command("vf", "add", "@zeroxpv_hflip:hflip")
+    } else {
+      MPVLib.command("vf", "remove", "@zeroxpv_hflip")
+    }
+    playerUpdate.value = PlayerUpdates.ShowText(if (newMirrorState) "H-Flip On" else "H-Flip Off")
+  }
+
+  fun toggleVerticalFlip() {
+    val newState = !_transformState.value.isVerticalFlipped
+    _transformState.update { it.copy(isVerticalFlipped = newState) }
+
+    // Use labeled video filter for vflip to avoid state desync
+    if (newState) {
+      MPVLib.command("vf", "add", "@zeroxpv_vflip:vflip")
+    } else {
+      MPVLib.command("vf", "remove", "@zeroxpv_vflip")
+    }
+
+    playerUpdate.value = PlayerUpdates.ShowText(if (newState) "V-Flip On" else "V-Flip Off")
+  }
+
+  fun toggleHdrScreenOutput() {
+    val nextMode =
+      if (_hdrScreenMode.value == HdrScreenMode.OFF) HdrScreenMode.defaultEnabledMode
+      else HdrScreenMode.OFF
+    setHdrScreenMode(nextMode)
+  }
+
+  fun setHdrScreenMode(mode: HdrScreenMode) {
+    val pipelineReady = isHdrScreenOutputAvailable(mode)
+    if (mode != HdrScreenMode.OFF && !pipelineReady) {
+      val message = if (mode == HdrScreenMode.LINEAR) "Linear HDR needs GPU Next + Vulkan"
+                    else "HDR Screen output needs GPU Next"
+      playerUpdate.value = PlayerUpdates.ShowText(message)
+      applyHdrScreenOutput(HdrScreenMode.OFF)
+      return
+    }
+
+    _hdrScreenMode.value = mode
+    _isHdrScreenOutputEnabled.value = pipelineReady && mode != HdrScreenMode.OFF
+    decoderPreferences.hdrScreenMode.set(mode)
+    decoderPreferences.hdrScreenOutput.set(mode != HdrScreenMode.OFF)
+    applyHdrScreenOutput(mode)
+    playerUpdate.value = PlayerUpdates.ShowText("HDR Screen Output: ${mode.shortTitle}")
+  }
+
+  private fun isHdrScreenOutputAvailable(mode: HdrScreenMode = _hdrScreenMode.value): Boolean {
+    val needsVulkan = mode == HdrScreenMode.LINEAR
+    return if (needsVulkan) {
+      decoderPreferences.useVulkan.get() && decoderPreferences.gpuNext.get()
+    } else {
+      decoderPreferences.gpuNext.get()
+    }
+  }
+
+  private fun initialHdrScreenMode(): HdrScreenMode {
+    val savedMode = decoderPreferences.hdrScreenMode.get()
+    return if (savedMode == HdrScreenMode.OFF && decoderPreferences.hdrScreenOutput.get()) {
+      HdrScreenMode.defaultEnabledMode
+    } else {
+      savedMode
+    }
+  }
+
+  private fun refreshHdrScreenOutputPipelineState(): Boolean {
+    val pipelineReady = isHdrScreenOutputAvailable()
+    _isHdrScreenOutputPipelineReady.value = pipelineReady
+    _isHdrScreenOutputEnabled.value = pipelineReady && _hdrScreenMode.value != HdrScreenMode.OFF
+    return pipelineReady
+  }
+
+  private fun applyHdrScreenOutput(mode: HdrScreenMode) {
+    val pipelineReady = refreshHdrScreenOutputPipelineState()
+    runCatching {
+      val boostSdr = decoderPreferences.boostSdrToHdr.get()
+      applyHdrScreenOutputOptions(mode, pipelineReady, boostSdr)
+      applyHdrScreenOutputProperties(mode, pipelineReady, boostSdr)
+      applyHdrToysMode(mode, pipelineReady)
+    }.onFailure { e ->
+      Log.e(TAG, "Error applying HDR screen output: mode=$mode, pipelineReady=$pipelineReady", e)
+    }
+  }
+
+  /** Re-applies the current HDR mode to a newly loaded video. */
+  fun refreshHdrScreenOutputForCurrentVideo() {
+    applyHdrScreenOutput(_hdrScreenMode.value)
+  }
+
+  /**
+   * Called after Anime4K or file changes so HDR remains layered with the rest of
+   * the shader stack, then the ambient shader is moved back to the final pass.
+   */
+  fun restartHdrScreenOutputAndAmbientIfActive() {
+    refreshHdrScreenOutputForCurrentVideo()
+    restartAmbientIfActive()
+  }
+
+  private fun applyHdrToysMode(mode: HdrScreenMode, pipelineReady: Boolean) {
+    val profile = mode.hdrToysProfile
+    if (!pipelineReady || profile == null) {
+      hdrToysManager.clear()
+      return
+    }
+    if (!hdrToysManager.apply(profile)) {
+      playerUpdate.value = PlayerUpdates.ShowText("HDR Toys shaders unavailable")
+    }
+  }
+
+  // ==================== Ambient Mode Integration ====================
+
+  fun toggleAmbientMode() {
+    _isAmbientEnabled.value = !_isAmbientEnabled.value
+    playerPreferences.isAmbientEnabled.set(_isAmbientEnabled.value)
+    if (_isAmbientEnabled.value) {
+      lastAmbientScaleX = -1.0 // Force rewrite
+      updateAmbientStretch()
+      playerUpdate.value = PlayerUpdates.ShowText("Ambience Mode: ON")
+    } else {
+      disableAmbientShader()
+      playerUpdate.value = PlayerUpdates.ShowText("Ambience Mode: OFF")
+    }
+  }
+
+  /** Disables the ambient shader and resets video scale. Safe to call from any state. */
+  private fun disableAmbientShader() {
+    ambientDebounceJob?.cancel()
+    ambientShaderFile?.let { file ->
+      runCatching { MPVLib.command("change-list", "glsl-shaders", "remove", file.absolutePath) }
+      file.delete()
+    }
+    ambientShaderFile = null
+    ambientShaderDetachedForReload = false
+    // Reset the shader cache and scale tracking so a subsequent enable always
+    // compiles a fresh shader and recalculates the correct video-scale offsets.
+    lastCompiledShaderCode = null
+    lastAmbientScaleX = -1.0
+    lastAmbientScaleY = -1.0
+    runCatching {
+      val curX = MPVLib.getPropertyDouble("video-scale-x") ?: 1.0
+      val curY = MPVLib.getPropertyDouble("video-scale-y") ?: 1.0
+      if (curX != 1.0) MPVLib.setPropertyDouble("video-scale-x", 1.0)
+      if (curY != 1.0) MPVLib.setPropertyDouble("video-scale-y", 1.0)
+      if (MPVLib.getPropertyString("blend-subtitles") != "no") {
+        MPVLib.setPropertyString("blend-subtitles", "no")
+      }
+    }
+  }
+
+  /** Called when the device orientation changes. Refreshes ambient in both portrait and landscape. */
+  fun onOrientationChanged(isPortrait: Boolean) {
+    if (!_isAmbientEnabled.value) return
+
+    // Force shader refresh to adapt to new screen dimensions.
+    lastAmbientScaleX = -1.0
+    lastAmbientScaleY = -1.0
+    ambientDebounceJob?.cancel()
+    ambientDebounceJob = viewModelScope.launch(renderPrepDispatcher) {
+      delay(200)
+      updateAmbientStretch()
+    }
+  }
+
+  /** Removes the old file-specific ambient shader while preserving the user's selected ambient mode. */
+  fun prepareAmbientForNewVideo() {
+    if (!_isAmbientEnabled.value) return
+    disableAmbientShader()
+    lastAmbientScaleX = -1.0
+    lastAmbientScaleY = -1.0
+  }
+
+  /**
+   * Re-injects the ambient shader if ambient mode is currently ON.
+   * Called after shader-stack changes so ambient stays as the last OUTPUT pass.
+   */
+  fun restartAmbientIfActive() {
+    if (!_isAmbientEnabled.value) return
+    ambientShaderFile?.let { oldFile ->
+      runCatching { MPVLib.command("change-list", "glsl-shaders", "remove", oldFile.absolutePath) }
+      ambientShaderDetachedForReload = true
+    }
+    lastAmbientScaleX = -1.0         // Force scale recalculation
+    lastAmbientScaleY = -1.0
+    // NOTE: lastCompiledShaderCode is intentionally NOT reset here. updateAmbientStretch()
+    // reuses the cached compiled shader while the generated source is unchanged and only
+    // re-attaches when detached for shader-stack reordering — forcing a full remove+write+
+    // reload here caused redundant GPU shader recompiles on every video-param refresh.
+    // Small delay to let Anime4K shaders settle
+    ambientDebounceJob?.cancel()
+    ambientDebounceJob = viewModelScope.launch(renderPrepDispatcher) {
+      delay(200)
+      updateAmbientStretch()
+    }
+  }
+
+  fun updateAmbientVisualMode(mode: AmbientVisualMode) {
+    if (_ambientVisualMode.value == mode) return
+
+    _ambientVisualMode.value = mode
+    playerPreferences.ambientVisualMode.set(mode)
+
+    if (_isAmbientEnabled.value) {
+      playerUpdate.value = PlayerUpdates.ShowText("Ambient Style: ${mode.label}")
+      scheduleAmbientUpdate(75)
+    }
+  }
+
+  fun updateAmbientParams(
+    blurSamples: Int = _ambientBlurSamples.value,
+    maxRadius: Float = _ambientMaxRadius.value,
+    glowIntensity: Float = _ambientGlowIntensity.value,
+    satBoost: Float = _ambientSatBoost.value,
+    ditherNoise: Float = _ambientDitherNoise.value,
+    bezelDepth: Float = _ambientBezelDepth.value,
+    vignetteStrength: Float = _ambientVignetteStrength.value,
+    warmth: Float = _ambientWarmth.value,
+    fadeCurve: Float = _ambientFadeCurve.value,
+    opacity: Float = _ambientOpacity.value
+  ) {
+    _ambientBlurSamples.value = blurSamples
+    _ambientMaxRadius.value = maxRadius
+    _ambientGlowIntensity.value = glowIntensity
+    _ambientSatBoost.value = satBoost
+    _ambientDitherNoise.value = ditherNoise
+    _ambientBezelDepth.value = bezelDepth
+    _ambientVignetteStrength.value = vignetteStrength
+    _ambientWarmth.value = warmth
+    _ambientFadeCurve.value = fadeCurve
+    _ambientOpacity.value = opacity
+
+    // Persist to preferences
+    playerPreferences.ambientBlurSamples.set(blurSamples)
+    playerPreferences.ambientMaxRadius.set(maxRadius)
+    playerPreferences.ambientGlowIntensity.set(glowIntensity)
+    playerPreferences.ambientSatBoost.set(satBoost)
+    playerPreferences.ambientDitherNoise.set(ditherNoise)
+    playerPreferences.ambientBezelDepth.set(bezelDepth)
+    playerPreferences.ambientVignetteStrength.set(vignetteStrength)
+    playerPreferences.ambientWarmth.set(warmth)
+    playerPreferences.ambientFadeCurve.set(fadeCurve)
+    playerPreferences.ambientOpacity.set(opacity)
+
+    scheduleAmbientUpdate()
+  }
+
+  /** Fast profile — low GPU cost, still visually solid. */
+  fun updateFrameExtendParams(
+    extendStrength: Float = _frameExtendStrength.value,
+    detailProtection: Float = _frameExtendDetailProtection.value,
+    glowMix: Float = _frameExtendGlowMix.value,
+    ditherNoise: Float = _ambientDitherNoise.value,
+  ) {
+    _frameExtendStrength.value = extendStrength
+    _frameExtendDetailProtection.value = detailProtection
+    _frameExtendGlowMix.value = glowMix
+    _ambientDitherNoise.value = ditherNoise
+
+    playerPreferences.ambientExtendStrength.set(extendStrength)
+    playerPreferences.ambientExtendDetailProtection.set(detailProtection)
+    playerPreferences.ambientExtendGlowMix.set(glowMix)
+    playerPreferences.ambientDitherNoise.set(ditherNoise)
+
+    scheduleAmbientUpdate()
+  }
+
+  private fun scheduleAmbientUpdate(delayMs: Long = 150L) {
+    if (!_isAmbientEnabled.value) return
+
+    ambientDebounceJob?.cancel()
+    ambientDebounceJob = viewModelScope.launch(renderPrepDispatcher) {
+      delay(delayMs)
+      updateAmbientStretch()
+    }
+  }
+
+  private fun setAmbientSampleBudget(sampleBudget: Int) {
+    _ambientBlurSamples.value = sampleBudget
+    playerPreferences.ambientBlurSamples.set(sampleBudget)
+  }
+
+  private fun applyFrameExtendPreset(preset: AmbientFrameExtendPreset) {
+    setAmbientSampleBudget(preset.sampleBudget)
+
+    _frameExtendStrength.value = preset.extendStrength
+    _frameExtendDetailProtection.value = preset.detailProtection
+    _frameExtendGlowMix.value = preset.glowMix
+    _ambientDitherNoise.value = preset.ditherNoise
+    playerPreferences.ambientExtendStrength.set(preset.extendStrength)
+    playerPreferences.ambientExtendDetailProtection.set(preset.detailProtection)
+    playerPreferences.ambientExtendGlowMix.set(preset.glowMix)
+    playerPreferences.ambientDitherNoise.set(preset.ditherNoise)
+
+    _ambientBezelDepth.value = preset.bezelDepth
+    _ambientVignetteStrength.value = preset.vignetteStrength
+    _ambientOpacity.value = preset.opacity
+    playerPreferences.ambientBezelDepth.set(preset.bezelDepth)
+    playerPreferences.ambientVignetteStrength.set(preset.vignetteStrength)
+    playerPreferences.ambientOpacity.set(preset.opacity)
+
+    scheduleAmbientUpdate()
+  }
+
+  fun applyAmbientProfileFast() {
+    when (_ambientVisualMode.value) {
+      AmbientVisualMode.GLOW -> {
+        val preset = AmbientShaderPresets.glowFast
+        updateAmbientParams(
+          blurSamples = preset.blurSamples,
+          maxRadius = preset.maxRadius,
+          glowIntensity = preset.glowIntensity,
+          satBoost = preset.satBoost,
+          vignetteStrength = preset.vignetteStrength,
+          warmth = preset.warmth,
+          fadeCurve = preset.fadeCurve,
+          opacity = preset.opacity,
+        )
+      }
+      AmbientVisualMode.FRAME_EXTEND -> applyFrameExtendPreset(AmbientShaderPresets.frameExtendFast)
+    }
+  }
+
+  /** Balanced profile — good quality/performance trade-off for most devices. */
+  fun applyAmbientProfileBalanced() {
+    when (_ambientVisualMode.value) {
+      AmbientVisualMode.GLOW -> {
+        val preset = AmbientShaderPresets.glowBalanced
+        updateAmbientParams(
+          blurSamples = preset.blurSamples,
+          maxRadius = preset.maxRadius,
+          glowIntensity = preset.glowIntensity,
+          satBoost = preset.satBoost,
+          vignetteStrength = preset.vignetteStrength,
+          warmth = preset.warmth,
+          fadeCurve = preset.fadeCurve,
+          opacity = preset.opacity,
+        )
+      }
+      AmbientVisualMode.FRAME_EXTEND -> applyFrameExtendPreset(AmbientShaderPresets.frameExtendBalanced)
+    }
+  }
+
+  /** High Quality profile — maximum visual fidelity for high-end devices. */
+  fun applyAmbientProfileHighQuality() {
+    when (_ambientVisualMode.value) {
+      AmbientVisualMode.GLOW -> {
+        val preset = AmbientShaderPresets.glowHighQuality
+        updateAmbientParams(
+          blurSamples = preset.blurSamples,
+          maxRadius = preset.maxRadius,
+          glowIntensity = preset.glowIntensity,
+          satBoost = preset.satBoost,
+          vignetteStrength = preset.vignetteStrength,
+          warmth = preset.warmth,
+          fadeCurve = preset.fadeCurve,
+          opacity = preset.opacity,
+        )
+      }
+      AmbientVisualMode.FRAME_EXTEND -> applyFrameExtendPreset(AmbientShaderPresets.frameExtendHighQuality)
+    }
+  }
+
+  fun updateAmbientBatterySaver(enabled: Boolean) {
+    _isAmbientBatterySaver.value = enabled
+    playerPreferences.ambientBatterySaver.set(enabled)
+    if (enabled && _isAmbientEnabled.value) {
+      applyBatterySaverPolicy()
+    } else if (!enabled && ambientWasOnBattery && _isAmbientEnabled.value) {
+      restoreFromBatterySaver()
+    }
+  }
+
+  private fun applyBatterySaverPolicy() {
+    if (_ambientBlurSamples.value <= 4) return
+    ambientPreBatterySaverSamples = _ambientBlurSamples.value
+    ambientPreBatterySaverRadius = _ambientMaxRadius.value
+    ambientPreBatterySaverIntensity = _ambientGlowIntensity.value
+    ambientPreBatterySaverSatBoost = _ambientSatBoost.value
+    ambientPreBatterySaverVignette = _ambientVignetteStrength.value
+    ambientPreBatterySaverWarmth = _ambientWarmth.value
+    ambientPreBatterySaverFadeCurve = _ambientFadeCurve.value
+    ambientPreBatterySaverOpacity = _ambientOpacity.value
+    ambientWasOnBattery = true
+    applyAmbientProfileFast()
+    playerUpdate.value = PlayerUpdates.ShowText("Ambient: Battery Saver ON")
+  }
+
+  private fun restoreFromBatterySaver() {
+    if (!ambientWasOnBattery) return
+    ambientWasOnBattery = false
+    updateAmbientParams(
+      blurSamples = ambientPreBatterySaverSamples,
+      maxRadius = ambientPreBatterySaverRadius,
+      glowIntensity = ambientPreBatterySaverIntensity,
+      satBoost = ambientPreBatterySaverSatBoost,
+      vignetteStrength = ambientPreBatterySaverVignette,
+      warmth = ambientPreBatterySaverWarmth,
+      fadeCurve = ambientPreBatterySaverFadeCurve,
+      opacity = ambientPreBatterySaverOpacity,
+    )
+    playerUpdate.value = PlayerUpdates.ShowText("Ambient: Battery Saver OFF")
+  }
+
+  fun onBatteryStateChanged(isCharging: Boolean) {
+    if (!_isAmbientBatterySaver.value || !_isAmbientEnabled.value) return
+    if (isCharging) {
+      restoreFromBatterySaver()
+    } else {
+      applyBatterySaverPolicy()
+    }
+  }
+
+  fun updateAmbientStretch() {
+    if (!_isAmbientEnabled.value) return
+
+    runCatching {
+      val osdW = MPVLib.getPropertyInt("osd-width") ?: 1920
+      val osdH = MPVLib.getPropertyInt("osd-height") ?: 1080
+
+      // Portrait mode: ambient glow goes on top/bottom (letterbox)
+      // Landscape mode: ambient glow goes on left/right (pillarbox)
+      // Both are handled by the same scaleX/scaleY math below
+
+      var vidW = (MPVLib.getPropertyInt("video-params/w") ?: 1920).toDouble()
+      var vidH = (MPVLib.getPropertyInt("video-params/h") ?: 1080).toDouble()
+      val par  = MPVLib.getPropertyDouble("video-params/par") ?: 1.0
+      val rot  = MPVLib.getPropertyInt("video-params/rotate") ?: 0
+
+      // Intercept autocrop boundaries — if a crop is active, use the cropped dimensions
+      // so the shader's aspect-ratio math matches the actual visible video area
+      val crop = MPVLib.getPropertyString("video-crop") ?: ""
+      val cropMatch = ambientCropRegex.find(crop)
+      if (cropMatch != null) {
+        vidW = cropMatch.groupValues[1].toDouble()
+        vidH = cropMatch.groupValues[2].toDouble()
+      }
+
+      if (osdW <= 0 || osdH <= 0 || vidW <= 0.0 || vidH <= 0.0) return
+
+      // Apply pixel aspect ratio (non-square pixels)
+      vidW *= par
+      // Swap dimensions for 90°/270° rotated videos (portrait shot stored as landscape)
+      if (rot == 90 || rot == 270) { val tmp = vidW; vidW = vidH; vidH = tmp }
+
+      val screenAr = osdW.toDouble() / osdH.toDouble()
+      val vidAr    = vidW / vidH
+
+      // Scale the video to fill the screen — the shader remaps it back to the
+      // correct aspect ratio, so only the "overflow" area receives ambient glow.
+      val scaleX = if (screenAr > vidAr) screenAr / vidAr else 1.0
+      val scaleY = if (vidAr > screenAr) vidAr / screenAr else 1.0
+
+      if (Math.abs(scaleX - lastAmbientScaleX) > 0.001 ||
+          Math.abs(scaleY - lastAmbientScaleY) > 0.001) {
+        lastAmbientScaleX = scaleX
+        lastAmbientScaleY = scaleY
+        MPVLib.setPropertyDouble("video-scale-x", scaleX)
+        MPVLib.setPropertyDouble("video-scale-y", scaleY)
+      }
+      val blendMode = if (subtitlesPreferences.blendSubtitlesWithVideo.get()) "video" else "no"
+      if (MPVLib.getPropertyString("blend-subtitles") != blendMode) {
+        MPVLib.setPropertyString("blend-subtitles", blendMode)
+      }
+
+      // ── Snapshot current parameter values ─────────────────────────────────
+      val sx      = lastAmbientScaleX
+      val sy      = lastAmbientScaleY
+      // Thermal-aware sample budget: cap shader complexity before the device enters
+      // hard CPU/GPU throttling.  On a cool device this is a no-op.
+      val rawSamples = _ambientBlurSamples.value
+      val samples = ThermalMonitor.clampAmbientSampleBudget(rawSamples, thermalHeadroom)
+      val radius  = _ambientMaxRadius.value
+      val glow    = _ambientGlowIntensity.value
+      val sat     = _ambientSatBoost.value
+      val dither  = _ambientDitherNoise.value
+      val bezel   = _ambientBezelDepth.value
+      val vignette= _ambientVignetteStrength.value
+      val warmth  = _ambientWarmth.value
+      val curve   = _ambientFadeCurve.value
+      val opacity = _ambientOpacity.value
+
+      // ── Generate GLSL shader ───────────────────────────────────────────────
+      val shaderCode = buildAmbientShader(
+        sx = sx, sy = sy,
+        blurSamples = samples, maxRadius = radius,
+        glowIntensity = glow, satBoost = sat,
+        ditherNoise = dither, bezelDepth = bezel,
+        vignetteStrength = vignette, warmth = warmth,
+        fadeCurve = curve, opacity = opacity,
+      )
+
+      // ── Shader parameter cache ─────────────────────────────────────────────
+      // If every baked-in #define is identical to the last compiled shader, skip the
+      // remove+write+reload cycle and reuse the compiled shader. When the shader was
+      // detached only for shader-stack reordering, re-attach the same source instead of
+      // forcing a recompile.
+      if (shaderCode == lastCompiledShaderCode) {
+        if (ambientShaderDetachedForReload) {
+          ambientShaderFile?.let { file ->
+            runCatching { MPVLib.command("change-list", "glsl-shaders", "append", file.absolutePath) }
+          }
+          ambientShaderDetachedForReload = false
+        }
+        return
+      }
+      lastCompiledShaderCode = shaderCode
+
+      // Each reload gets a unique filename so MPV never reuses a cached
+      // compiled shader — incrementing seq guarantees a fresh compile every time.
+      val newFile = File(host.context.cacheDir, "ambient_${++ambientShaderSeq}.glsl")
+      newFile.writeText(shaderCode)
+      ambientShaderFile?.let { oldFile ->
+        runCatching { MPVLib.command("change-list", "glsl-shaders", "remove", oldFile.absolutePath) }
+        oldFile.delete()
+      }
+      MPVLib.command("change-list", "glsl-shaders", "append", newFile.absolutePath)
+      ambientShaderFile = newFile
+      ambientShaderDetachedForReload = false
+    }.onFailure { e ->
+      Log.e(TAG, "Failed to update ambient stretch", e)
+    }
+  }
+
+  /**
+   * Builds the True Ambient GLSL shader string with all parameters baked in
+   * as `#define` constants. The shader:
+   *   1. Detects the video region using aspect-ratio correction (SCALE_X/Y).
+   *   2. For interior pixels — returns the original (unscaled) video pixel.
+   *   3. For ambient pixels — samples the nearest video-edge with a
+   *      Fibonacci-spiral blur kernel and composites the glowing result.
+   */
+  private fun buildAmbientShader(
+    sx: Double, sy: Double,
+    blurSamples: Int, maxRadius: Float,
+    glowIntensity: Float, satBoost: Float,
+    ditherNoise: Float, bezelDepth: Float,
+    vignetteStrength: Float, warmth: Float,
+    fadeCurve: Float, opacity: Float,
+  ): String {
+    val context = AmbientRenderContext(scaleX = sx, scaleY = sy)
+    val shared =
+      AmbientSharedShaderConfig(
+        bezelDepth = if (_ambientVisualMode.value == AmbientVisualMode.FRAME_EXTEND) bezelDepth else 0f,
+        vignetteStrength = vignetteStrength,
+        opacity = opacity,
+      )
+
+    val spec: AmbientShaderSpec =
+      when (_ambientVisualMode.value) {
+        AmbientVisualMode.GLOW ->
+          AmbientGlowShaderSpec(
+            context = context,
+            shared = shared,
+            blurSamples = blurSamples,
+            maxRadius = maxRadius,
+            glowIntensity = glowIntensity,
+            satBoost = satBoost,
+            warmth = warmth,
+            fadeCurve = fadeCurve,
+          )
+        AmbientVisualMode.FRAME_EXTEND ->
+          AmbientFrameExtendShaderSpec(
+            context = context,
+            shared = shared,
+            sampleBudget = blurSamples,
+            extendStrength = _frameExtendStrength.value,
+            detailProtection = _frameExtendDetailProtection.value,
+            glowMix = _frameExtendGlowMix.value,
+            ditherNoise = ditherNoise,
+          )
+      }
+
+    return AmbientShaderBuilder.build(spec)
+  }
+
+  // ==================== Utility ====================
+
+  fun showToast(message: String) {
+    Toast.makeText(host.context, message, Toast.LENGTH_SHORT).show()
+  }
+
+  override fun onCleared() {
+    // Deterministic cleanup of resources that previously relied on GC.
+    // viewModelScope is auto-cancelled by ViewModel, but the following
+    // resources are not coroutine-scoped and need explicit release.
+    // See issue 2.1 in the leak audit.
+
+    // Evict all cached Bitmaps from the seek-thumbnail LruCache so the
+    // memory is returned immediately rather than waiting for the next GC
+    // pass (which may not happen before the next playback session starts,
+    // causing cumulative heap growth across rapid back-to-back plays).
+    runCatching { seekThumbnailCache.evictAll() }
+
+    // The metadataCache (Pair<String, String> entries) is small and
+    // bounded at 100 entries, so it is not urgent to clear, but clearing
+    // here keeps the working set fresh for the next session.
+    runCatching { metadataCache.evictAll() }
+
+    super.onCleared()
+  }
+
+}
+
+// Extension functions
+fun Float.normalize(
+  inMin: Float,
+  inMax: Float,
+  outMin: Float,
+  outMax: Float,
+): Float = (this - inMin) * (outMax - outMin) / (inMax - inMin) + outMin
+
+fun <T> Flow<T>.collectAsState(
+  scope: CoroutineScope,
+  initialValue: T? = null,
+) = object : ReadOnlyProperty<Any?, T?> {
+  private var value: T? = initialValue
+
+  init {
+    scope.launch { collect { value = it } }
+  }
+
+  override fun getValue(
+    thisRef: Any?,
+    property: KProperty<*>,
+  ) = value
+}
+
+private fun String.md5(): String {
+  val digest = MessageDigest.getInstance("MD5").digest(toByteArray())
+  return digest.joinToString("") { byte -> "%02x".format(byte) }
+}

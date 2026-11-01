@@ -1,0 +1,24 @@
+                                   ▄
+  █▀▀█ █▀▀█ █▀▀█ █▀▀▄ █▀▀▀ █▀▀█ █▀▀█ █▀▀█
+  █  █ █  █ █▀▀▀ █  █ █    █  █ █  █ █▀▀▀
+  ▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀
+
+  Session   Feature comparison: ZeroXPV, mpvrx, mpvrex
+  Continue  opencode -s ses_f8e3505a9ffeztgUs5tbtzdfz5
+
+alwayszihan@fedora:~/Apps/ZeroXPV$
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

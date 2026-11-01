@@ -1,0 +1,92 @@
+package io.alwayszihan.zeroxpv.preferences
+
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
+import io.alwayszihan.zeroxpv.preferences.preference.PreferenceStore
+import io.alwayszihan.zeroxpv.preferences.preference.getEnum
+import io.alwayszihan.zeroxpv.repository.subtitle.OnlineSubtitleSearchMode
+import io.alwayszihan.zeroxpv.repository.subtitlehub.ZeroXPVSubtitleHubSources
+import io.alwayszihan.zeroxpv.ui.player.controls.components.panels.SubtitlesBorderStyle
+import io.alwayszihan.zeroxpv.ui.icons.AppIcon
+import io.alwayszihan.zeroxpv.ui.icons.Icons
+
+class SubtitlesPreferences(
+  preferenceStore: PreferenceStore,
+) {
+  val preferredLanguages = preferenceStore.getString("sub_preferred_languages")
+  val autoloadMatchingSubtitles = preferenceStore.getBoolean("sub_autoload_enabled", true)
+  val autoEnableSubtitles = preferenceStore.getBoolean("sub_auto_enable", true)
+
+  val fontsFolder = preferenceStore.getString("sub_fonts_folder")
+  val font = preferenceStore.getString("sub_font", "")
+  val fontSize = preferenceStore.getInt("sub_font_size", 55)
+  val subScale = preferenceStore.getFloat("sub_scale", 1f)
+  val borderSize = preferenceStore.getInt("sub_border_size", 3)
+  val bold = preferenceStore.getBoolean("sub_bold", false)
+  val italic = preferenceStore.getBoolean("sub_italic", false)
+
+  val textColor = preferenceStore.getInt("sub_color_text", Color.White.toArgb())
+
+  val borderColor = preferenceStore.getInt("sub_color_border", Color.Black.toArgb())
+  val borderStyle = preferenceStore.getEnum("sub_border_style", SubtitlesBorderStyle.OutlineAndShadow)
+  val shadowOffset = preferenceStore.getInt("sub_shadow_offset", 0)
+  val backgroundColor = preferenceStore.getInt("sub_color_bg", Color.Transparent.toArgb())
+  val shadowColor = preferenceStore.getInt("sub_color_shadow", Color.Black.toArgb())
+
+  val justification = preferenceStore.getEnum("sub_justify", SubtitleJustification.Auto)
+  val subPos = preferenceStore.getInt("sub_pos", 100)
+
+  val overrideAssSubs = preferenceStore.getBoolean("sub_override_ass")
+  val scaleByWindow = preferenceStore.getBoolean("sub_scale_by_window", true)
+  val blendSubtitlesWithVideo = preferenceStore.getBoolean("sub_blend_with_video", false)
+
+  val defaultSubDelay = preferenceStore.getInt("sub_default_delay")
+  val defaultSubSpeed = preferenceStore.getFloat("sub_default_speed", 1f)
+
+  val pickerPath = preferenceStore.getString("sub_picker_path")
+  
+  val subtitleSaveFolder = preferenceStore.getString("sub_save_folder", "")
+  val subdlLanguages = preferenceStore.getStringSet("subdl_languages", setOf("en"))
+  val subtitleSearchLanguages = subdlLanguages
+  val onlineSubtitleSearchMode = preferenceStore.getOnlineSubtitleSearchMode()
+  val subtitleHubSources = preferenceStore.getStringSet("subtitle_hub_sources", ZeroXPVSubtitleHubSources.DEFAULT)
+  
+  val wyzieSources = preferenceStore.getStringSet("wyzie_sources", setOf("all"))
+  val wyzieFormats = preferenceStore.getStringSet("wyzie_formats", setOf("srt", "ass"))
+  val wyzieEncodings = preferenceStore.getStringSet("wyzie_encodings", setOf("utf-8"))
+  val wyzieHearingImpaired = preferenceStore.getBoolean("wyzie_hi", false)
+  val wyzieApiKey = preferenceStore.getString("wyzie_api_key", "")
+  val wyzieCachedSourcesJson = preferenceStore.getString("wyzie_cached_sources_json", "")
+  val wyzieRelease = preferenceStore.getString("wyzie_release", "")
+  val wyzieFile = preferenceStore.getString("wyzie_file", "")
+  val wyzieOrigin = preferenceStore.getString("wyzie_origin", "")
+  val wyzieRefresh = preferenceStore.getBoolean("wyzie_refresh", false)
+}
+
+private fun PreferenceStore.getOnlineSubtitleSearchMode() =
+  getObject(
+    key = "online_subtitle_search_mode",
+    defaultValue = OnlineSubtitleSearchMode.HYBRID,
+    serializer = { it.name },
+    deserializer = { stored ->
+      when (stored) {
+        OnlineSubtitleSearchMode.WYZIE.name -> OnlineSubtitleSearchMode.WYZIE
+        OnlineSubtitleSearchMode.SUBHUB.name,
+        "ZEROXPV_SUBTITLE_HUB" -> OnlineSubtitleSearchMode.SUBHUB
+        OnlineSubtitleSearchMode.HYBRID.name,
+        "HYBRID_SEQUENTIAL",
+        "HYBRID_PARALLEL" -> OnlineSubtitleSearchMode.HYBRID
+        else -> OnlineSubtitleSearchMode.HYBRID
+      }
+    },
+  )
+
+enum class SubtitleJustification(
+  val value: String,
+  val icon: AppIcon,
+) {
+  Left("left", Icons.Default.FormatAlignLeft),
+  Center("center", Icons.Default.FormatAlignCenter),
+  Right("right", Icons.Default.FormatAlignRight),
+  Auto("auto", Icons.Default.FormatAlignJustify),
+}

@@ -1,0 +1,301 @@
+import com.android.build.api.variant.FilterConfiguration
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
+val enableX86 = project.findProperty("enableX86") != "false"
+val x86Abis = if (enableX86) listOf("x86", "x86_64") else emptyList()
+
+plugins {
+  alias(libs.plugins.android.application)
+  alias(libs.plugins.kotlin.compose.compiler)
+  alias(libs.plugins.kotlinx.serialization)
+  alias(libs.plugins.ksp)
+  alias(libs.plugins.room)
+}
+
+kotlin {
+  jvmToolchain(17)
+}
+
+android {
+  namespace = "io.alwayszihan.zeroxpv"
+  compileSdk = 37
+
+  signingConfigs {
+    create("release") {
+      val propsFile = rootProject.file("keystore.properties")
+      if (propsFile.exists()) {
+        val props = propsFile.readLines().mapNotNull { line ->
+          val idx = line.indexOf('=')
+          if (idx > 0) line.substring(0, idx).trim() to line.substring(idx + 1).trim() else null
+        }.toMap()
+        storeFile = rootProject.file(props["storefile"] as String)
+        storePassword = props["storepass"] as String
+        keyAlias = props["keyalias"] as String
+        keyPassword = props["keypass"] as String
+      }
+    }
+  }
+
+  defaultConfig {
+    applicationId = "io.alwayszihan.zeroxpv"
+    minSdk = 26
+    targetSdk = 36
+    versionCode = 256
+    versionName = "2.5.6"
+
+    vectorDrawables {
+      useSupportLibrary = true
+    }
+
+    buildConfigField("String", "GIT_SHA", "\"${getCommitSha()}\"")
+    buildConfigField("int", "GIT_COUNT", getCommitCount())
+
+    externalNativeBuild {
+      cmake {
+        abiFilters += listOf("arm64-v8a") + x86Abis
+      }
+    }
+  }
+
+  externalNativeBuild {
+    cmake {
+      path = file("src/main/cpp/CMakeLists.txt")
+      version = "3.22.1"
+    }
+  }
+
+  flavorDimensions += "distribution"
+
+  productFlavors {
+    create("standard") {
+      dimension = "distribution"
+      buildConfigField("boolean", "ENABLE_UPDATE_FEATURE", "true")
+      buildConfigField("boolean", "SCOPED_STORAGE_ONLY", "false")
+    }
+  }
+
+  dependenciesInfo {
+    includeInApk = false
+    includeInBundle = false
+  }
+
+  splits {
+    abi {
+      isEnable = true
+      reset()
+      include("arm64-v8a")
+      if (enableX86) {
+        include("x86", "x86_64")
+      }
+      isUniversalApk = false
+    }
+  }
+
+  buildTypes {
+    named("release") {
+      isMinifyEnabled = true
+      isShrinkResources = true
+      proguardFiles(
+        getDefaultProguardFile("proguard-android-optimize.txt"),
+        "proguard-rules.pro"
+      )
+      signingConfig = signingConfigs.getByName("release").takeIf { it.storeFile != null }
+        ?: signingConfigs.getByName("debug")
+      ndk {
+        debugSymbolLevel = "none"
+      }
+    }
+
+    create("preview") {
+      initWith(getByName("release"))
+      signingConfig = null
+      applicationIdSuffix = ".preview"
+      versionNameSuffix = "-${getCommitCount()}"
+    }
+
+    named("debug") {
+      applicationIdSuffix = ".debug"
+      versionNameSuffix = "-${getCommitCount()}"
+      resValue("string", "app_name", "ZeroXPV-Debug")
+    }
+  }
+
+  compileOptions {
+    isCoreLibraryDesugaringEnabled = true
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+  }
+
+  buildFeatures {
+    compose = true
+    viewBinding = true
+    buildConfig = true
+    resValues = true
+    prefab = true
+  }
+
+  packaging {
+    resources {
+      excludes += "/META-INF/{AL2.0,LGPL2.1}"
+      excludes += "META-INF/DEPENDENCIES"
+      excludes += "META-INF/LICENSE*"
+      excludes += "META-INF/NOTICE*"
+      excludes += "META-INF/*.kotlin_module"
+      excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+    }
+    jniLibs {
+      useLegacyPackaging = true
+      pickFirsts += "**/libc++_shared.so"
+    }
+  }
+
+  @Suppress("UnstableApiUsage")
+  androidResources {
+    generateLocaleConfig = true
+  }
+
+  lint {
+    checkReleaseBuilds = false
+    abortOnError = false
+  }
+}
+
+androidComponents {
+  val abiCodes = mutableMapOf(
+    "arm64-v8a" to 2
+  )
+  if (enableX86) {
+    abiCodes["x86"] = 3
+    abiCodes["x86_64"] = 4
+  }
+
+  onVariants { variant ->
+    variant.outputs.forEach { output ->
+      val abi = output.filters
+        .find { it.filterType == FilterConfiguration.FilterType.ABI }
+        ?.identifier
+
+      output.versionCode.set(
+        (output.versionCode.orNull ?: 0) * 10 + (abiCodes[abi] ?: 0)
+      )
+    }
+  }
+}
+
+kotlin {
+  compilerOptions {
+    freeCompilerArgs.addAll(
+      "-opt-in=com.google.accompanist.permissions.ExperimentalPermissionsApi",
+      "-opt-in=androidx.compose.material3.ExperimentalMaterial3Api",
+      "-opt-in=androidx.compose.material3.ExperimentalMaterial3ExpressiveApi"
+    )
+    jvmTarget.set(JvmTarget.JVM_17)
+  }
+}
+
+composeCompiler {
+  includeSourceInformation = false
+}
+
+room {
+  schemaDirectory("$projectDir/schemas")
+}
+
+dependencies {
+  implementation(libs.androidx.activity.compose)
+  implementation(platform(libs.androidx.compose.bom))
+  implementation(libs.androidx.ui)
+  implementation(libs.androidx.ui.graphics)
+  implementation(libs.androidx.material3.android)
+  implementation(libs.google.material)
+  implementation(libs.androidx.compose.material)
+  implementation(libs.androidx.ui.tooling.preview)
+  debugImplementation(libs.androidx.ui.tooling)
+  implementation(libs.bundles.compose.navigation3)
+  implementation(libs.androidx.biometric)
+  implementation(libs.androidx.fragment)
+  implementation(libs.androidx.appcompat)
+  implementation(libs.androidx.core.ktx)
+  implementation(libs.androidx.compose.constraintlayout)
+  implementation(libs.androidx.preference.ktx)
+  implementation(libs.androidx.constraintlayout)
+  // implementation(libs.composables.material.symbols.rounded.filled.android)
+  // implementation(libs.composables.material.symbols.rounded.filled.cmp)
+  implementation(libs.androidx.compose.animation.graphics)
+  implementation(libs.mediasession)
+  implementation(libs.androidx.documentfile)
+  implementation(libs.bundles.coil)
+
+  implementation(platform(libs.koin.bom))
+  implementation(libs.bundles.koin)
+
+  implementation(libs.seeker)
+  implementation(libs.compose.prefs)
+
+  implementation(libs.accompanist.permissions)
+
+  implementation(libs.room.runtime)
+  ksp(libs.room.compiler)
+  implementation(libs.room.ktx)
+
+  implementation(libs.kotlinx.immutable.collections)
+  implementation(libs.kotlinx.serialization.json)
+  implementation(libs.okhttp)
+  implementation(libs.curl.android)
+  implementation(libs.jsoup)
+  implementation(libs.androidx.media3.common)
+  implementation(libs.androidx.media3.effect)
+  implementation(libs.androidx.media3.transformer)
+  implementation(platform(libs.sora.bom))
+  implementation(libs.sora.editor)
+  implementation(libs.sora.language.textmate)
+  // implementation(libs.sora.oniguruma.native)
+
+  coreLibraryDesugaring(libs.desugar.jdk.libs)
+
+  implementation(libs.truetype.parser)
+  implementation(libs.fsaf)
+  implementation(libs.mediainfo.lib)
+  implementation("com.llamatik:library:1.4.0")
+  implementation(libs.androidx.profileinstaller)
+  implementation(libs.google.cast.framework)
+  
+  implementation(files("libs/mpvlib.aar"))
+
+  // Network protocol libraries
+  implementation(libs.smbj)
+  implementation(libs.commons.net)
+  implementation(libs.sardine.android) {
+    exclude(group = "xpp3", module = "xpp3")
+  }
+  implementation(libs.nanohttpd)
+  implementation(libs.lazycolumnscrollbar)
+  implementation(libs.reorderable)
+  implementation(libs.bundles.iptv.media3)
+}
+
+/* ---------------- Git helpers ---------------- */
+
+fun getCommitCount(): String =
+  runCommand("git rev-list --count HEAD") ?: "0"
+
+fun getCommitSha(): String =
+  runCommand("git rev-parse --short HEAD") ?: "unknown"
+
+fun runCommand(command: String): String? =
+  try {
+    val parts = command.split(' ')
+    val process = ProcessBuilder(parts)
+      .redirectErrorStream(false)
+      .start()
+
+    val output = process.inputStream
+      .bufferedReader()
+      .readText()
+      .trim()
+
+    process.waitFor()
+    if (process.exitValue() != 0) null else output.ifEmpty { null }
+  } catch (e: Exception) {
+    null
+  }
